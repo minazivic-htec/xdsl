@@ -170,7 +170,7 @@ def test_reciprocal_op_custom_full_range_false():
     val = create_ssa_value(VectorType(f32, [8]))
     op = ReciprocalOp(val, target_type=VectorType(f32, [8]),
                       full_range=False)
-    assert op.full_range.value.data == 0 
+    assert op.full_range.value.data == 0
 
 def test_weird_op_scalar():
     val = create_ssa_value(f32)

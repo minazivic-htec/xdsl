@@ -1313,8 +1313,9 @@ class UIToFPOp(IntegerToFloatingPointBaseOp):
 class ExtFOp(IRDLOperation):
     name = "arith.extf"
 
-    input = operand_def(AnyFloatConstr)
-    result = result_def(AnyFloatConstr)
+    input = operand_def(ContainerOf(AnyFloatConstr))
+    result = result_def(ContainerOf(AnyFloatConstr))
+    # AnyFloatConstr
 
     def __init__(self, op: SSAValue | Operation, target_type: AnyFloat):
         super().__init__(operands=[op], result_types=[target_type])
@@ -1328,8 +1329,8 @@ class ExtFOp(IRDLOperation):
 class TruncFOp(IRDLOperation):
     name = "arith.truncf"
 
-    input = operand_def(AnyFloatConstr)
-    result = result_def(AnyFloatConstr)
+    input = operand_def(ContainerOf(AnyFloatConstr))
+    result = result_def(ContainerOf(AnyFloatConstr))
 
     def __init__(self, op: SSAValue | Operation, target_type: AnyFloat):
         super().__init__(operands=[op], result_types=[target_type])

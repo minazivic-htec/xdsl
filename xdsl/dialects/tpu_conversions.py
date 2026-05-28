@@ -1,15 +1,33 @@
 
 from enum import auto
 
-from xdsl.dialects.builtin import AnyFloatConstr, BoolAttr, Float32Type, IntegerType, VectorType
-from xdsl.ir.core import Attribute, EnumAttribute, Operation, SSAValue, SpacedOpaqueSyntaxAttribute
+from xdsl.dialects.builtin import (
+    AnyFloatConstr,
+    BoolAttr,
+    Float32Type,
+    IntegerType,
+    VectorType,
+)
+from xdsl.ir.core import (
+    Attribute,
+    EnumAttribute,
+    Operation,
+    SpacedOpaqueSyntaxAttribute,
+    SSAValue,
+)
 from xdsl.irdl.attributes import irdl_attr_definition
 from xdsl.irdl.constraints import AnyOf, BaseAttr
-from xdsl.irdl.operations import IRDLOperation, attr_def, irdl_op_definition, operand_def, result_def, traits_def
+from xdsl.irdl.operations import (
+    IRDLOperation,
+    attr_def,
+    irdl_op_definition,
+    operand_def,
+    result_def,
+    traits_def,
+)
 from xdsl.traits import Pure, SameOperandsAndResultType
 from xdsl.utils.exceptions import VerifyException
 from xdsl.utils.str_enum import StrEnum
-
 
 _AnyFloatLike = AnyOf((
     AnyFloatConstr,
@@ -18,7 +36,7 @@ _AnyFloatLike = AnyOf((
 
 _AnySignlessIntegerLike = AnyOf((
     BaseAttr(IntegerType),
-    VectorType.constr(element_type=BaseAttr(IntegerType))  
+    VectorType.constr(element_type=BaseAttr(IntegerType))
 ))
 
 class RoundingMode(StrEnum):
@@ -63,7 +81,7 @@ class FPToUIOp(IRDLOperation):
     input = operand_def(_AnyFloatLike)
     rounding_mode = attr_def(RoundingModeAttr)
     output = result_def(_AnySignlessIntegerLike)
-    
+
     traits = traits_def(Pure())
 
     assembly_format = "$input attr-dict `:` type($input) `->` type($output)"
@@ -90,7 +108,7 @@ class SIToFPOp(IRDLOperation):
     input = operand_def(_AnySignlessIntegerLike)
     rounding_mode = attr_def(RoundingModeAttr)
     output = result_def(_AnyFloatLike)
-    
+
     traits = traits_def(Pure())
 
     assembly_format = "$input attr-dict `:` type($input) `->` type($output)"
@@ -117,7 +135,7 @@ class UIToFPOp(IRDLOperation):
     input = operand_def(_AnySignlessIntegerLike)
     rounding_mode = attr_def(RoundingModeAttr)
     output = result_def(_AnyFloatLike)
-    
+
     traits = traits_def(Pure())
 
     assembly_format = "$input attr-dict `:` type($input) `->` type($output)"
@@ -141,7 +159,7 @@ class ExtFOp(IRDLOperation):
     name = "tpu.extf"
     input = operand_def(_AnyFloatLike)
     out = result_def(_AnyFloatLike)
-    
+
     traits = traits_def(Pure())
 
     assembly_format = "$input attr-dict `:` type($input) `->` type($out)"
@@ -164,7 +182,7 @@ class TruncFOp(IRDLOperation):
     input = operand_def(_AnyFloatLike)
     rounding_mode = attr_def(RoundingModeAttr)
     out = result_def(_AnyFloatLike)
-    
+
     traits = traits_def(Pure())
 
     assembly_format = "$input attr-dict `:` type($input) `->` type($out)"
@@ -222,7 +240,7 @@ class ReciprocalOp (IRDLOperation):
             raise VerifyException(
                 "tpu.reciprocal: Not implemented: Reciprocal op for non-f32 dtypes"
             )
-        
+
 @irdl_op_definition
 class WeirdOp(IRDLOperation):
     name = "tpu.weird"
@@ -245,17 +263,16 @@ class WeirdOp(IRDLOperation):
         out_type = self.output.type
 
         if isinstance(in_type, VectorType):
-            in_elem: Attribute = in_type.element_type 
+            in_elem: Attribute = in_type.element_type
             if not isinstance(in_elem, Float32Type):
                 raise VerifyException("tpu.weird: Input type must be F32")
             if not isinstance(out_type, VectorType):
                 raise VerifyException("tpu.weird: Output must be a vector when input is a vector")
-            out_elem: Attribute = out_type.element_type 
-            if not (isinstance(out_elem, IntegerType) and out_elem.width.data == 1): 
-                raise VerifyException("tpu.weird: Output type must be I1") 
+            out_elem: Attribute = out_type.element_type
+            if not (isinstance(out_elem, IntegerType) and out_elem.width.data == 1):
+                raise VerifyException("tpu.weird: Output type must be I1")
         else:
             if not isinstance(in_type, Float32Type):
                 raise VerifyException("tpu:weird: Input type must be F32")
             if not (isinstance(out_type, IntegerType) and out_type.width.data==1):
                 raise VerifyException("tpu.weird: Output type must be I1 scalar")
-            

@@ -1,4 +1,4 @@
-# TPU memory ops: load/store variants 
+# TPU memory ops: load/store variants
 
 # Conventions inherited from the rest of the dialect:
 #   - VectorType / MemRefType used loosely (vector non-zero-rank is not
@@ -15,8 +15,8 @@
 # functions: _verify_load_op_common, _verify_store_op_common, and
 # _verify_strided_op_common. Per-op verify_ methods do op-specific
 # checks (right number of indices, etc.) and then call the helper.
- 
-from typing import Sequence
+
+from collections.abc import Sequence
 
 from xdsl.dialects.builtin import (
     I32,
@@ -28,10 +28,11 @@ from xdsl.dialects.builtin import (
     MemRefType,
     NoneAttr,
     VectorType,
+    f32,
     i1,
     i32,
-    f32
 )
+from xdsl.dialects.tpu_memref import MemorySpace
 from xdsl.ir.core import Attribute, Operation, SSAValue
 from xdsl.irdl.constraints import AnyOf, EqAttrConstraint
 from xdsl.irdl.operations import (
@@ -44,24 +45,22 @@ from xdsl.irdl.operations import (
     opt_operand_def,
     result_def,
     traits_def,
-    var_operand_def
+    var_operand_def,
 )
 from xdsl.traits import MemoryReadEffect, MemoryWriteEffect
 from xdsl.utils.exceptions import VerifyException
 
-# ---------- helpers ------------
 
 def _check_base_is_vmem(op_name: str, ref_ty: MemRefType) -> None:
-    # Lazy import to break a circular dependency with tpu.py.
-    from xdsl.dialects.tpu import MemorySpace, MemorySpaceAttr
- 
+    from xdsl.dialects.tpu_memref import MemorySpaceAttr
+
     mem_sp = ref_ty.memory_space
     if isinstance(mem_sp, NoneAttr):
         return
     if isinstance(mem_sp, MemorySpaceAttr) and mem_sp.value.data != MemorySpace.Vmem:
         raise VerifyException(f"{op_name}: Expected base memref to be in VMEM.")
- 
- 
+
+
 def _check_mask_broadcastable(
     op_name: str,
     value_ty: VectorType,
@@ -76,8 +75,8 @@ def _check_mask_broadcastable(
     raise VerifyException(
         f"{op_name}: Expected mask shape to be broadcastable to result shape."
     )
- 
- 
+
+
 def _verify_load_op_common(
     op_name: str,
     ref_ty: MemRefType,
@@ -85,12 +84,12 @@ def _verify_load_op_common(
     mask: SSAValue | None,
 ) -> None:
     _check_base_is_vmem(op_name, ref_ty)
- 
+
     if value_ty.element_type != ref_ty.element_type:
         raise VerifyException(
             f"{op_name}: Expected base and result element type to match."
         )
- 
+
     if mask is not None:
         mask_ty = mask.type
         assert isinstance(mask_ty, VectorType)
@@ -98,12 +97,11 @@ def _verify_load_op_common(
         bw = getattr(elem, "bitwidth", None)
         if bw is None or bw != 32:
             raise VerifyException(
-                f"{op_name}: Not implemented: masked load with non-32-bit "
-                "element type"
+                f"{op_name}: Not implemented: masked load with non-32-bit element type"
             )
         _check_mask_broadcastable(op_name, value_ty, mask_ty)
- 
- 
+
+
 def _verify_store_op_common(
     op_name: str,
     ref_ty: MemRefType,
@@ -111,12 +109,12 @@ def _verify_store_op_common(
     mask: SSAValue | None,
 ) -> None:
     _check_base_is_vmem(op_name, ref_ty)
- 
+
     if value_ty.element_type != ref_ty.element_type:
         raise VerifyException(
             f"{op_name}: Expected base and value_to_store element type to match"
         )
- 
+
     if mask is not None:
         mask_ty = mask.type
         assert isinstance(mask_ty, VectorType)
@@ -124,12 +122,11 @@ def _verify_store_op_common(
         bw = getattr(elem, "bitwidth", None)
         if bw is None or bw != 32:
             raise VerifyException(
-                f"{op_name}: Not implemented: masked store with non-32-bit "
-                "element type"
+                f"{op_name}: Not implemented: masked store with non-32-bit element type"
             )
         _check_mask_broadcastable(op_name, value_ty, mask_ty)
- 
- 
+
+
 def _verify_strided_op_common(
     op_name: str,
     ref_ty: MemRefType,
@@ -139,34 +136,36 @@ def _verify_strided_op_common(
     min_stride: int,
 ) -> None:
     rank = len(ref_ty.get_shape())
- 
+
     if rank != indices_len:
         raise VerifyException(
             f"{op_name}: Base memref's rank and indices size do not match: "
             f"{rank} vs {indices_len}"
         )
- 
+
     stride_values = list(strides.get_values())
     if rank != len(stride_values):
         raise VerifyException(
             f"{op_name}: Base memref's rank and strides size do not match: "
             f"{rank} vs {len(stride_values)}"
         )
- 
+
     value_rank = len(value_ty.get_shape())
     if rank != value_rank:
         raise VerifyException(
             f"{op_name}: Base memref's rank and result's rank do not match: "
             f"{rank} vs {value_rank}"
         )
- 
+
     for i, s in enumerate(stride_values):
         if s < min_stride:
             raise VerifyException(
                 f"{op_name}: Strides[{i}]={s} must be >= {min_stride}"
             )
 
+
 # ----------- operacije -------------
+
 
 @irdl_op_definition
 class LoadOp(IRDLOperation):
@@ -180,9 +179,7 @@ class LoadOp(IRDLOperation):
 
     traits = traits_def(MemoryReadEffect())
 
-    assembly_format = (
-        "$base `[` $indices `]` `sublanes` $sublane_mask `sublane_stride` $sublane_stride attr-dict `:` type($base) `,` type($result)"
-    )
+    assembly_format = "$base `[` $indices `]` `sublanes` $sublane_mask `sublane_stride` $sublane_stride attr-dict `:` type($base) `,` type($result)"
 
     def __init__(
         self,
@@ -190,7 +187,7 @@ class LoadOp(IRDLOperation):
         indices: Sequence[SSAValue | Operation],
         sublane_mask: DenseArrayBase,
         result_type: Attribute,
-        sublane_stride: int | IntegerAttr[IntegerType] = 1
+        sublane_stride: int | IntegerAttr[IntegerType] = 1,
     ):
         if isinstance(sublane_stride, int):
             sublane_stride = IntegerAttr(sublane_stride, i32)
@@ -199,7 +196,7 @@ class LoadOp(IRDLOperation):
         super().__init__(
             operands=[base, list(indices)],
             result_types=[result_type],
-            attributes={"sublane_mask": sublane_mask, "sublane_stride": sublane_stride}
+            attributes={"sublane_mask": sublane_mask, "sublane_stride": sublane_stride},
         )
 
 
@@ -210,7 +207,9 @@ class StoreOp(IRDLOperation):
     base = operand_def(MemRefType)
     indices = var_operand_def(IndexType)
     sublane_mask = attr_def(DenseArrayBase.constr(i1))
-    mask = opt_operand_def()       # verifier ce posle proveriti da li je vektor, tkd mozd ovde moze i vectortype
+    mask = (
+        opt_operand_def()
+    )  # verifier ce posle proveriti da li je vektor, tkd mozd ovde moze i vectortype
     sublane_stride = opt_attr_def(IntegerAttr[I32])
     add = attr_def(BoolAttr)
 
@@ -230,7 +229,7 @@ class StoreOp(IRDLOperation):
         sublane_mask: DenseArrayBase,
         mask: SSAValue | Operation | None = None,
         sublane_stride: int | IntegerAttr[IntegerType] = 1,
-        add: bool | BoolAttr = False
+        add: bool | BoolAttr = False,
     ):
         if isinstance(sublane_stride, int):
             sublane_stride = IntegerAttr(sublane_stride, i32)
@@ -243,8 +242,8 @@ class StoreOp(IRDLOperation):
             attributes={
                 "sublane_mask": sublane_mask,
                 "sublane_stride": sublane_stride,
-                "add": add
-            }
+                "add": add,
+            },
         )
 
 
@@ -269,13 +268,13 @@ class VectorLoadOp(IRDLOperation):
         indices: Sequence[SSAValue | Operation],
         strides: DenseArrayBase,
         result_type: Attribute,
-        mask: SSAValue | Operation | None = None
+        mask: SSAValue | Operation | None = None,
     ):
         mask_list: list[SSAValue | Operation] = [mask] if mask is not None else []
         super().__init__(
             operands=[base, list(indices), mask_list],
             result_types=[result_type],
-            attributes={"strides": strides}
+            attributes={"strides": strides},
         )
 
     def verify_(self) -> None:
@@ -287,17 +286,18 @@ class VectorLoadOp(IRDLOperation):
         rank = len(ref_ty.get_shape())
         if len(self.indices) != rank:
             raise VerifyException(f"tpu.vector_load: Expected {rank} indices.")
-        
+
         strides_values = list(self.strides.get_values())
         if strides_values:
             if len(strides_values) != rank:
                 raise VerifyException(f"tpu.vector_load: Expected {rank} strides.")
-            raise VerifyException("tpu.vector_load: Not implemented: general vector load with strides.")
-        
+            raise VerifyException(
+                "tpu.vector_load: Not implemented: general vector load with strides."
+            )
+
         mask = self.mask
-        _verify_load_op_common(
-            "tpu.vector_load", ref_ty, result_ty, mask
-        )
+        _verify_load_op_common("tpu.vector_load", ref_ty, result_ty, mask)
+
 
 @irdl_op_definition
 class VectorStoreOp(IRDLOperation):
@@ -332,31 +332,26 @@ class VectorStoreOp(IRDLOperation):
             attributes={"strides": strides, "add": add},
         )
 
-
     def verify_(self) -> None:
         strides_values = list(self.strides.get_values())
         if strides_values:
             raise VerifyException(
-                "tpu.vector_store: Not implemented: general vector store "
-                "with strides."
+                "tpu.vector_store: Not implemented: general vector store with strides."
             )
- 
+
         ref_ty = self.base.type
         value_ty = self.value_to_store.type
         assert isinstance(ref_ty, MemRefType)
         assert isinstance(value_ty, VectorType)
- 
+
         rank = len(ref_ty.get_shape())
         if len(self.indices) != rank:
-            raise VerifyException(
-                f"tpu.vector_store: Expected {rank} indices."
-            )
- 
+            raise VerifyException(f"tpu.vector_store: Expected {rank} indices.")
+
         mask = self.mask
-        _verify_store_op_common(
-            "tpu.vector_store", ref_ty, value_ty, mask
-        )
- 
+        _verify_store_op_common("tpu.vector_store", ref_ty, value_ty, mask)
+
+
 @irdl_op_definition
 class StridedLoadOp(IRDLOperation):
     name = "tpu.strided_load"
@@ -367,19 +362,21 @@ class StridedLoadOp(IRDLOperation):
     result = result_def(VectorType)
     traits = traits_def(MemoryReadEffect())
 
-    assembly_format = "$base `[` $indices `]` attr-dict `:` type($base) `,` type($result)"
+    assembly_format = (
+        "$base `[` $indices `]` attr-dict `:` type($base) `,` type($result)"
+    )
 
     def __init__(
         self,
         base: SSAValue | Operation,
         indices: Sequence[SSAValue | Operation],
         strides: DenseArrayBase,
-        result_type: Attribute
+        result_type: Attribute,
     ):
         super().__init__(
-            operands=[base,list(indices)],
+            operands=[base, list(indices)],
             result_types=[result_type],
-            attributes={"strides": strides}
+            attributes={"strides": strides},
         )
 
     def verify_(self) -> None:
@@ -393,8 +390,9 @@ class StridedLoadOp(IRDLOperation):
             result_ty,
             len(self.indices),
             self.strides,
-            min_stride=0
+            min_stride=0,
         )
+
 
 @irdl_op_definition
 class StridedStoreOp(IRDLOperation):
@@ -406,21 +404,19 @@ class StridedStoreOp(IRDLOperation):
 
     traits = traits_def(MemoryWriteEffect())
 
-    assembly_format = (
-        "$base `[` $indices `]` `,` $value_to_store attr-dict `:` type($base) `,` type($value_to_store)"
-    )
+    assembly_format = "$base `[` $indices `]` `,` $value_to_store attr-dict `:` type($base) `,` type($value_to_store)"
 
     def __init__(
         self,
         value_to_store: SSAValue | Operation,
         base: SSAValue | Operation,
         indices: Sequence[SSAValue | Operation],
-        strides: DenseArrayBase
+        strides: DenseArrayBase,
     ):
         super().__init__(
             operands=[value_to_store, base, list(indices)],
             result_types=[],
-            attributes={"strides": strides}
+            attributes={"strides": strides},
         )
 
     def verify_(self) -> None:
@@ -434,7 +430,7 @@ class StridedStoreOp(IRDLOperation):
             value_ty,
             len(self.indices),
             self.strides,
-            min_stride=1
+            min_stride=1,
         )
 
 
@@ -466,11 +462,10 @@ class ShuffledLoadOp(IRDLOperation):
             result_types=[result_type],
             attributes={
                 "sublane_mask": sublane_mask,
-                "sublane_offsets": sublane_offsets
-            }
+                "sublane_offsets": sublane_offsets,
+            },
         )
 
-    
     def verify_(self) -> None:
         ref_ty = self.base.type
         result_ty = self.result.type
@@ -482,24 +477,22 @@ class ShuffledLoadOp(IRDLOperation):
             raise VerifyException(
                 f"tpu.shuffled_load: Base memref's rank and indices size "
                 f"do not match: {rank} vs {len(self.indices)}"
-
             )
-        
+
         first_dim = result_ty.get_shape()[0]
         sublane_mask_values = list(self.sublane_mask.get_values())
         if len(sublane_mask_values) != first_dim:
             raise VerifyException(
                 f"tpu.shuffled_load: Expected sublane mask size equal to {first_dim} but got {len(sublane_mask_values)}"
             )
-        
+
         sublane_offset_vals = list(self.sublane_offsets.get_values())
         if len(sublane_offset_vals) != first_dim:
             raise VerifyException(
                 f"tpu.shuffled_load: Expected sublane offsets size equals to {first_dim} but got {len(sublane_offset_vals)}"
             )
-        
-        # TODO canonicalizer
 
+        # TODO canonicalizer
 
 
 @irdl_op_definition
@@ -513,9 +506,7 @@ class ShuffledStoreOp(IRDLOperation):
 
     traits = traits_def(MemoryWriteEffect())
 
-    assembly_format = (
-        "$base `[` $indices `]` `,` $value_to_store attr-dict `:` type($base) `,` type($value_to_store)"
-    )
+    assembly_format = "$base `[` $indices `]` `,` $value_to_store attr-dict `:` type($base) `,` type($value_to_store)"
 
     def __init__(
         self,
@@ -523,15 +514,15 @@ class ShuffledStoreOp(IRDLOperation):
         base: SSAValue | Operation,
         indices: Sequence[SSAValue | Operation],
         sublane_mask: DenseArrayBase,
-        sublane_offsets: DenseArrayBase
+        sublane_offsets: DenseArrayBase,
     ):
         super().__init__(
             operands=[value_to_store, base, list(indices)],
             result_types=[],
             attributes={
                 "sublane_mask": sublane_mask,
-                "sublane_offsets": sublane_offsets
-            }
+                "sublane_offsets": sublane_offsets,
+            },
         )
 
     def verify_(self) -> None:
@@ -540,62 +531,69 @@ class ShuffledStoreOp(IRDLOperation):
         assert isinstance(ref_ty, MemRefType)
         assert isinstance(value_ty, VectorType)
 
-
         rank = len(ref_ty.get_shape())
         if rank != len(self.indices):
             raise VerifyException(
                 f"tpu.shuffled_store: Base memref's rank and indices size do not match: {rank} vs {len(self.indices)}"
             )
-        
+
         value_rank = len(value_ty.get_shape())
         if value_rank != len(self.indices):
-            raise VerifyException(f"tpu.shuffled_store: The rank of value to store and indices do not match: {rank} vs {len(self.indices)}")
-        
+            raise VerifyException(
+                f"tpu.shuffled_store: The rank of value to store and indices do not match: {rank} vs {len(self.indices)}"
+            )
+
         first_dim = value_ty.get_shape()[0]
         sublane_mask_vals = list(self.sublane_mask.get_values())
         if len(sublane_mask_vals) != first_dim:
-            raise VerifyException(f"tpu.shuffled_store: Expected sublane mask size equals to {first_dim} but got {len(sublane_mask_vals)}")
-        
+            raise VerifyException(
+                f"tpu.shuffled_store: Expected sublane mask size equals to {first_dim} but got {len(sublane_mask_vals)}"
+            )
+
         sublane_offsets_vals = list(self.sublane_offsets.get_values())
         if len(sublane_offsets_vals) != first_dim:
-            raise VerifyException(f"tpu.shuffled_store: Expected sublane offset mask size equals to {first_dim} but got {len(sublane_mask_vals)}")
-        
+            raise VerifyException(
+                f"tpu.shuffled_store: Expected sublane offset mask size equals to {first_dim} but got {len(sublane_mask_vals)}"
+            )
+
         # TODO canonicalizer
+
 
 @irdl_op_definition
 class VectorLoadIdxOp(IRDLOperation):
     name = "tpu.vector_load_idx"
-    base = operand_def(MemRefType.constr(AnyOf((EqAttrConstraint(i32), EqAttrConstraint(f32)))))
+    base = operand_def(
+        MemRefType.constr(AnyOf((EqAttrConstraint(i32), EqAttrConstraint(f32))))
+    )
     indices = var_operand_def(VectorType.constr(i32))
     mask = opt_operand_def(VectorType.constr(i1))
-    value = result_def(VectorType.constr(AnyOf((EqAttrConstraint(i32), EqAttrConstraint(f32)))))
+    value = result_def(
+        VectorType.constr(AnyOf((EqAttrConstraint(i32), EqAttrConstraint(f32))))
+    )
 
     irdl_options = (AttrSizedOperandSegments(),)
     traits = traits_def(MemoryReadEffect())
 
     assembly_format = "$base `[` $indices `]` (`masked` $mask^)? attr-dict `:` type($base) `[` type($indices) `]` `,` type($value) `,` type($mask)"
 
-
     def __init__(
         self,
         base: SSAValue | Operation,
         indices: Sequence[SSAValue | Operation],
         result_type: Attribute,
-        mask: SSAValue | Operation | None = None
+        mask: SSAValue | Operation | None = None,
     ):
         mask_list: list[SSAValue | Operation] = [mask] if mask is not None else []
         super().__init__(
-            operands=[base, list(indices), mask_list],
-            result_types=[result_type]
+            operands=[base, list(indices), mask_list], result_types=[result_type]
         )
 
     def verify_(self) -> None:
-
         ref_ty = self.base.type
         value_ty = self.value.type
         assert isinstance(ref_ty, MemRefType)
         assert isinstance(value_ty, VectorType)
- 
+
         rank = len(ref_ty.get_shape())
         if len(self.indices) != rank:
             raise VerifyException(
@@ -609,21 +607,23 @@ class VectorLoadIdxOp(IRDLOperation):
             assert isinstance(index_ty, VectorType)
             if list(index_ty.get_shape()) != value_shape:
                 raise VerifyException(
-                    f"tpu.vector_load_idx: Expected {value_shape} elements in indices. Got {list(index_ty.get_shape()) }"
+                    f"tpu.vector_load_idx: Expected {value_shape} elements in indices. Got {list(index_ty.get_shape())}"
                     f"in inedx #{i}."
                 )
 
         mask = self.mask
-        _verify_load_op_common(
-            "tpu.vector_load_idx", ref_ty, value_ty, mask
-        )
+        _verify_load_op_common("tpu.vector_load_idx", ref_ty, value_ty, mask)
 
 
 @irdl_op_definition
 class VectorStoreIdxOp(IRDLOperation):
     name = "tpu.vector_store_idx"
-    value_to_store = operand_def(VectorType.constr(AnyOf((EqAttrConstraint(i32), EqAttrConstraint(f32)))))
-    base = operand_def(MemRefType.constr(AnyOf((EqAttrConstraint(i32), EqAttrConstraint(f32)))))
+    value_to_store = operand_def(
+        VectorType.constr(AnyOf((EqAttrConstraint(i32), EqAttrConstraint(f32))))
+    )
+    base = operand_def(
+        MemRefType.constr(AnyOf((EqAttrConstraint(i32), EqAttrConstraint(f32))))
+    )
     indices = var_operand_def(VectorType.constr(i32))
     mask = opt_operand_def(VectorType.constr(i1))
     add = opt_attr_def(BoolAttr)
@@ -642,7 +642,7 @@ class VectorStoreIdxOp(IRDLOperation):
         base: SSAValue | Operation,
         indices: Sequence[SSAValue | Operation],
         mask: SSAValue | Operation | None = None,
-        add: bool | BoolAttr = False
+        add: bool | BoolAttr = False,
     ):
         if isinstance(add, bool):
             add = BoolAttr.from_bool(add)
@@ -650,7 +650,7 @@ class VectorStoreIdxOp(IRDLOperation):
         super().__init__(
             operands=[value_to_store, base, list(indices), mask_list],
             result_types=[],
-            attributes={"add": add}
+            attributes={"add": add},
         )
 
     def verify_(self) -> None:
@@ -658,14 +658,14 @@ class VectorStoreIdxOp(IRDLOperation):
         value_ty = self.value_to_store.type
         assert isinstance(ref_ty, MemRefType)
         assert isinstance(value_ty, VectorType)
- 
+
         rank = len(ref_ty.get_shape())
         if len(self.indices) != rank:
             raise VerifyException(
                 f"tpu.vector_store_idx: Expected one index vector for each dimension of the base memref with dimension: {rank}. "
                 f"Got: {len(self.indices)}"
             )
-        
+
         if len(value_ty.get_shape()) != 1:
             raise VerifyException(
                 f"tpu.vector_store_idx: Expected value to have rank 1. Got: {len(value_ty.get_shape())}"
@@ -677,13 +677,9 @@ class VectorStoreIdxOp(IRDLOperation):
             assert isinstance(index_ty, VectorType)
             if list(index_ty.get_shape()) != value_shape:
                 raise VerifyException(
-                    f"tpu.vector_store_idx: Expected {value_shape} elements in indices. Got {list(index_ty.get_shape()) }"
+                    f"tpu.vector_store_idx: Expected {value_shape} elements in indices. Got {list(index_ty.get_shape())}"
                     f"in index #{i}."
                 )
 
         mask = self.mask
-        _verify_store_op_common(
-            "tpu.vector_store_idx", ref_ty, value_ty, mask
-        )
-
-
+        _verify_store_op_common("tpu.vector_store_idx", ref_ty, value_ty, mask)

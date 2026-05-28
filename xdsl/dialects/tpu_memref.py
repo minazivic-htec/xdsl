@@ -1,36 +1,40 @@
-
-#----------------------------------------------------
-#                memref 
-#----------------------------------------------------
-
+from collections.abc import Sequence
 from enum import auto
-from typing import Sequence
 
 from xdsl.dialects.builtin import (
     DYNAMIC_INDEX,
     FixedBitwidthType,
     MemRefType,
     NoneAttr,
-    i32
+    i32,
 )
 from xdsl.dialects.func import FuncOp
-
-from xdsl.ir.core import Attribute, Data, EnumAttribute, Operation, ParametrizedAttribute, SpacedOpaqueSyntaxAttribute, TypeAttribute
+from xdsl.interfaces import HasFolderInterface
+from xdsl.ir.core import (
+    Attribute,
+    Data,
+    EnumAttribute,
+    Operation,
+    ParametrizedAttribute,
+    SSAValue,
+    TypeAttribute,
+)
 from xdsl.irdl.attributes import irdl_attr_definition, param_def
-
 from xdsl.irdl.operations import (
     AttrSizedOperandSegments,
     IRDLOperation,
     irdl_op_definition,
-    operand_def, 
+    operand_def,
     opt_operand_def,
     result_def,
     traits_def,
-    var_operand_def
+    var_operand_def,
 )
 from xdsl.parser.attribute_parser import AttrParser
+from xdsl.pattern_rewriter import RewritePattern
 from xdsl.printer import Printer
-from xdsl.traits import Pure
+from xdsl.traits import HasCanonicalizationPatternsTrait, Pure
+from xdsl.transforms.canonicalization_patterns.utils import const_evaluate_operand
 from xdsl.utils.exceptions import VerifyException
 from xdsl.utils.str_enum import StrEnum
 
@@ -39,10 +43,21 @@ class CoreType(StrEnum):
     Tc = auto()
     Sc_Scalar_Subcore = auto()
     Sc_Vector_Subcore = auto()
+
+
 @irdl_attr_definition
-class CoreTypeAttr(EnumAttribute[CoreType], SpacedOpaqueSyntaxAttribute): 
+class CoreTypeAttr(EnumAttribute[CoreType]):
     name = "tpu.core_type"
     enum_type = CoreType
+
+    @classmethod
+    def parse_parameter(cls, parser: AttrParser) -> CoreType:
+        with parser.in_angle_brackets():
+            return super().parse_parameter(parser)
+
+    def print_parameter(self, printer: Printer) -> None:
+        with printer.in_angle_brackets():
+            super().print_parameter(printer)
 
     @staticmethod
     def from_op(op: Operation) -> CoreType | None:
@@ -51,10 +66,10 @@ class CoreTypeAttr(EnumAttribute[CoreType], SpacedOpaqueSyntaxAttribute):
             if isinstance(op, FuncOp) and op.sym_name.data == "main":
                 return CoreType.Tc
             return None
-        
+
         if not isinstance(attr, CoreTypeAttr):
             return None
-        
+
         return attr.data
 
 
@@ -62,10 +77,12 @@ class CoreTypeAttr(EnumAttribute[CoreType], SpacedOpaqueSyntaxAttribute):
 class SemaphoreType(ParametrizedAttribute, TypeAttribute):
     name = "tpu.semaphore"
 
+
 @irdl_attr_definition
 class DMASemaphoreType(ParametrizedAttribute, TypeAttribute):
     name = "tpu.dma_semaphore"
-    
+
+
 class MemorySpace(StrEnum):
     Any = auto()
     Vmem = auto()
@@ -85,11 +102,20 @@ class _MemorySpaceData(Data[MemorySpace]):
     @classmethod
     def parse_parameter(cls, parser: AttrParser) -> MemorySpace:
         return parser.parse_str_enum(MemorySpace)
-    
+
     def print_parameter(self, printer: Printer) -> None:
         printer.print_identifier_or_string_literal(str(self.data))
 
-# memref ops
+
+class EraseLayoutHasCanonicalizerPatternsTrait(HasCanonicalizationPatternsTrait):
+    @classmethod
+    def get_canonicalization_patterns(cls) -> tuple[RewritePattern, ...]:
+        from xdsl.transforms.canonicalization_patterns.tpu import (
+            EraseLayoutChainCollapse,
+        )
+
+        return ((EraseLayoutChainCollapse()),)
+
 
 @irdl_attr_definition
 class MemorySpaceAttr(ParametrizedAttribute):
@@ -101,7 +127,7 @@ class MemorySpaceAttr(ParametrizedAttribute):
     def __init__(
         self,
         value: MemorySpace | _MemorySpaceData,
-        core_type: CoreType | CoreTypeAttr | None = None
+        core_type: CoreType | CoreTypeAttr | None = None,
     ):
         if isinstance(value, MemorySpace):
             value = _MemorySpaceData(value)
@@ -126,9 +152,9 @@ class MemorySpaceAttr(ParametrizedAttribute):
             if parser.parse_optional_punctuation(",") is not None:
                 core_type_enum = CoreTypeAttr.parse_parameter(parser)
                 core_type = CoreTypeAttr(core_type_enum)
-            
-        return[value, core_type]
-    
+
+        return [value, core_type]
+
     def print_parameters(self, printer: Printer) -> None:
         with printer.in_angle_brackets():
             self.value.print_parameter(printer)
@@ -137,13 +163,8 @@ class MemorySpaceAttr(ParametrizedAttribute):
                 self.core_type.print_parameter(printer)
 
 
-
 def _check_memref_memory_spaces_match(
-    # za MemRefSqueezeOp::verify, MemRefReshapeOp::verify, MemRefBitcastOp::verify
-    # provera da li se target memspace razlikuje od source 
-    op_name: str,
-    source: MemRefType,
-    target: MemRefType
+    op_name: str, source: MemRefType, target: MemRefType
 ) -> None:
     target_mem = target.memory_space
     if isinstance(target_mem, NoneAttr):
@@ -151,10 +172,8 @@ def _check_memref_memory_spaces_match(
     if target_mem != source.memory_space:
         raise VerifyException(f"{op_name}: Memory spaces do not match")
 
-def _check_semaphore_element_type(
-    op_name: str,
-    mem_ref_type: MemRefType
-) -> None:
+
+def _check_semaphore_element_type(op_name: str, mem_ref_type: MemRefType) -> None:
     mem_sp = mem_ref_type.memory_space
     if not isinstance(mem_sp, MemorySpaceAttr):
         return
@@ -165,7 +184,7 @@ def _check_semaphore_element_type(
         raise VerifyException(
             f"{op_name}: References to semaphore memory space must have a semaphore element type."
         )
-    
+
 
 def _compute_squeezed_dims(
     op_name: str,
@@ -205,25 +224,19 @@ def _compute_squeezed_dims(
 
     return squeezed
 
+
 @irdl_op_definition
-class MemRefSliceOp(IRDLOperation):
+class MemRefSliceOp(IRDLOperation, HasFolderInterface):
     name = "tpu.memref_slice"
     mem_ref = operand_def(MemRefType)
     base_idx = var_operand_def(i32)
-    dynamic_sizes =  var_operand_def(i32)
+    dynamic_sizes = var_operand_def(i32)
     result = result_def(MemRefType)
 
     irdl_options = (AttrSizedOperandSegments(),)
-    # opcije: kako se IR struktura enkoduje i parsira, printuje
-    # u ovom slucaju imamo vise variadic operanada, kroz attr sized op seg pratimo njihove velicine 
     traits = traits_def(Pure())
-    # traitovi su za semantiku, sta operacija znaci i radi, dok su irdl opcije za to
-    # traitovi ucestvuju u optimiacijama
-    # kako se operacija predstavlja
 
-    assembly_format = (
-        "$mem_ref `[` $base_idx `]` (`<` $dynamic_sizes^ `>`)? attr-dict `:` type($mem_ref) `->` type($result)"
-    )
+    assembly_format = "$mem_ref `[` $base_idx `]` (`<` $dynamic_sizes^ `>`)? attr-dict `:` type($mem_ref) `->` type($result)"
 
     def verify_(self) -> None:
         source_type = self.mem_ref.type
@@ -232,8 +245,10 @@ class MemRefSliceOp(IRDLOperation):
         assert isinstance(target_type, MemRefType)
 
         if not source_type.has_static_shape():
-            raise VerifyException("tpu.memref_slice: Only slicing of memrefs with static shapes is supported.")
-        
+            raise VerifyException(
+                "tpu.memref_slice: Only slicing of memrefs with static shapes is supported."
+            )
+
         target_dynamic_dim_count = sum(
             1 for d in target_type.get_shape() if d == DYNAMIC_INDEX
         )
@@ -242,22 +257,19 @@ class MemRefSliceOp(IRDLOperation):
             raise VerifyException(
                 "tpu.memref_slice: Number of provided dynamic dimensions sizes must match the number of dynamic dimensions in the target type"
             )
-        
+
         _check_semaphore_element_type("tpu.memref_slice", source_type)
-        
+
         source_shape = source_type.get_shape()
         slice_shape = target_type.get_shape()
-        if (
-            len(self.base_idx) != len(slice_shape)
-            or len(self.base_idx) != len(source_shape)
+        if len(self.base_idx) != len(slice_shape) or len(self.base_idx) != len(
+            source_shape
         ):
             raise VerifyException(
                 "tpu.memref_slice: Indices and slice shapes must match."
             )
- 
-        _check_memref_memory_spaces_match(
-            "tpu.memref_slice", source_type, target_type
-        )
+
+        _check_memref_memory_spaces_match("tpu.memref_slice", source_type, target_type)
 
         src_layout = source_type.layout
         tgt_layout = target_type.layout
@@ -267,8 +279,14 @@ class MemRefSliceOp(IRDLOperation):
                 "layouts (TiledLayoutAttr support is pending)."
             )
 
-        # TODO fold, canonicalizer
-        # TODO: TiledLayoutAttr provere u verify_, kada se TiledLayoutAttr bude odradio
+    def fold(self):
+        if len(self.dynamic_sizes) != 0:
+            return None
+        if self.mem_ref.type != self.result.type:
+            return None
+        if not all(const_evaluate_operand(idx) == 0 for idx in self.base_idx):
+            return None
+        return (self.mem_ref,)
 
 
 @irdl_op_definition
@@ -276,29 +294,29 @@ class MemRefSqueezeOp(IRDLOperation):
     name = "tpu.memref_squeeze"
     input = operand_def(MemRefType)
     result = result_def(MemRefType)
- 
+
     traits = traits_def(Pure())
- 
-    assembly_format = ("$input attr-dict `:` type($input) `->` type($result)")
- 
+
+    assembly_format = "$input attr-dict `:` type($input) `->` type($result)"
+
     def verify_(self) -> None:
         source_type = self.input.type
         target_type = self.result.type
         assert isinstance(source_type, MemRefType)
         assert isinstance(target_type, MemRefType)
- 
+
         _check_memref_memory_spaces_match(
-            "tpu.memref_squeeze", source_type, target_type 
+            "tpu.memref_squeeze", source_type, target_type
         )
- 
-        if source_type.element_type != target_type.element_type: 
-            raise VerifyException(
-                "tpu.memref_squeeze: Element types don't match."
-            )
-        
+
+        if source_type.element_type != target_type.element_type:
+            raise VerifyException("tpu.memref_squeeze: Element types don't match.")
+
         source_shape = list(source_type.get_shape())
         target_shape = list(target_type.get_shape())
-        squeezed = _compute_squeezed_dims("tpu.memref_squeeze", source_shape, target_shape)
+        squeezed = _compute_squeezed_dims(
+            "tpu.memref_squeeze", source_shape, target_shape
+        )
 
         if len(squeezed) == 0 and source_shape != target_shape:
             raise VerifyException(
@@ -307,6 +325,7 @@ class MemRefSqueezeOp(IRDLOperation):
 
     # TODO TiledLayoutAttr provere, canonicalizer
 
+
 @irdl_op_definition
 class MemRefReshapeOp(IRDLOperation):
     name = "tpu.memref_reshape"
@@ -314,33 +333,34 @@ class MemRefReshapeOp(IRDLOperation):
     result = result_def(MemRefType)
 
     traits = traits_def(Pure())
- 
-    assembly_format = ("$input attr-dict `:` type($input) `->` type($result)")
- 
+
+    assembly_format = "$input attr-dict `:` type($input) `->` type($result)"
+
     def verify_(self) -> None:
         source_type = self.input.type
         target_type = self.result.type
         assert isinstance(source_type, MemRefType)
         assert isinstance(target_type, MemRefType)
- 
+
         _check_memref_memory_spaces_match(
-            "tpu.memref_reshape", source_type, target_type 
+            "tpu.memref_reshape", source_type, target_type
         )
- 
-        if (len(source_type.get_shape()) < 2
-                or len(target_type.get_shape()) < 2):
-            raise VerifyException("tpu.memref_reshape: Not implemented: 1d memref reshape.")
- 
+
+        if len(source_type.get_shape()) < 2 or len(target_type.get_shape()) < 2:
+            raise VerifyException(
+                "tpu.memref_reshape: Not implemented: 1d memref reshape."
+            )
+
         if source_type.element_type != target_type.element_type:
             raise VerifyException("tpu.memref_reshape: Element types don't match.")
- 
+
         src_n = source_type.element_count()
         tgt_n = target_type.element_count()
         if src_n != tgt_n:
             raise VerifyException(
                 "tpu.memref_reshape: Number of elements doesn't match between input and output memref type."
             )
-        
+
         src_layout = source_type.layout
         tgt_layout = target_type.layout
         if not isinstance(src_layout, NoneAttr) or not isinstance(tgt_layout, NoneAttr):
@@ -351,37 +371,38 @@ class MemRefReshapeOp(IRDLOperation):
 
 
 @irdl_op_definition
-class MemRefBitcastOp(IRDLOperation):
+class MemRefBitcastOp(IRDLOperation, HasFolderInterface):
     name = "tpu.memref_bitcast"
     input = operand_def(MemRefType)
     result = result_def(MemRefType)
- 
+
     traits = traits_def(Pure())
- 
-    assembly_format = ("$input attr-dict `:` type($input) `->` type($result)")
- 
+
+    assembly_format = "$input attr-dict `:` type($input) `->` type($result)"
+
     def verify_(self) -> None:
         source_type = self.input.type
         target_type = self.result.type
         assert isinstance(source_type, MemRefType)
         assert isinstance(target_type, MemRefType)
- 
+
         _check_memref_memory_spaces_match(
             "tpu.memref_bitcast", source_type, target_type
         )
- 
+
         source_shape = source_type.get_shape()
         target_shape = target_type.get_shape()
- 
+
         if len(source_shape) != len(target_shape):
             raise VerifyException("tpu.memref_bitcast: Ranks do not match.")
- 
-        if len(source_shape) <= 1:
-            raise VerifyException("tpu.memref_bitcast: Not implemented: 1d memref bitcast.")
 
-        src_elem = source_type.element_type 
+        if len(source_shape) <= 1:
+            raise VerifyException(
+                "tpu.memref_bitcast: Not implemented: 1d memref bitcast."
+            )
+
+        src_elem = source_type.element_type
         tgt_elem = target_type.element_type
-        # C++ getElementTypeBitwidth je u xDSL element_type.bitwidth iz FixedBitwidthType
         assert isinstance(src_elem, FixedBitwidthType), (
             f"tpu.memref_bitcast: source element type {src_elem} has no fixed bitwidth"
         )
@@ -390,7 +411,7 @@ class MemRefBitcastOp(IRDLOperation):
         )
         src_bitwidth = src_elem.bitwidth
         tgt_bitwidth = tgt_elem.bitwidth
- 
+
         rank = len(source_shape)
         second_minormost = rank - 2
         for i in range(rank):
@@ -409,12 +430,17 @@ class MemRefBitcastOp(IRDLOperation):
                     raise VerifyException(
                         f"tpu.memref_bitcast: Expected the same dim size on dim {i}: {src_dim} vs {tgt_dim}"
                     )
-                
+
         if not isinstance(target_type.layout, NoneAttr):
             raise VerifyException(
                 "tpu.memref_bitcast: Not implemented: bitcast to non-identity layout (TiledLayoutAttr support is pending)."
             )
-        # TODO canonicalizer, TiledLayAttr
+
+    def fold(self):
+        if self.input.type == self.result.type:
+            return (self.input,)
+        return None
+
 
 @irdl_op_definition
 class ReinterpretCastOp(IRDLOperation):
@@ -422,20 +448,55 @@ class ReinterpretCastOp(IRDLOperation):
     input = operand_def(MemRefType)
     dynamic_offset = opt_operand_def(i32)
     result = result_def(MemRefType)
- 
+
     traits = traits_def(Pure())
- 
-    assembly_format = ("$input ($dynamic_offset^)? attr-dict `:` type($input) `->` type($result)")
- 
+
+    assembly_format = (
+        "$input ($dynamic_offset^)? attr-dict `:` type($input) `->` type($result)"
+    )
+
     def verify_(self) -> None:
         source_type = self.input.type
         target_type = self.result.type
         assert isinstance(source_type, MemRefType)
         assert isinstance(target_type, MemRefType)
- 
+
         if source_type.memory_space != target_type.memory_space:
             raise VerifyException(
                 f"tpu.reinterpret_cast: Source and target memory spaces must match, "
                 f"but got {source_type.memory_space} and {target_type.memory_space}"
             )
- 
+
+
+@irdl_op_definition
+class EraseLayoutOp(IRDLOperation, HasFolderInterface):
+    name = "tpu.erase_memref_layout"
+    operand = operand_def(MemRefType)
+    result = result_def(MemRefType)
+
+    traits = traits_def(Pure(), EraseLayoutHasCanonicalizerPatternsTrait())
+
+    assembly_format = "$operand attr-dict `:` type($operand) `->` type($result)"
+
+    def __init__(self, operand: SSAValue | Operation, result_type: Attribute):
+        super().__init__(operands=[operand], result_types=[result_type])
+
+    def verify_(self) -> None:
+        operand_ty = self.operand.type
+        result_ty = self.result.type
+        assert isinstance(operand_ty, MemRefType)
+        assert isinstance(result_ty, MemRefType)
+
+        if operand_ty.element_type != result_ty.element_type:
+            raise VerifyException(
+                "tpu.erase_memref_layout: Cannot change the memref element type"
+            )
+
+        _check_memref_memory_spaces_match(
+            "tpu.erase_memref_layout", operand_ty, result_ty
+        )
+
+    def fold(self):
+        if self.operand.type == self.result.type:
+            return (self.operand,)
+        return None

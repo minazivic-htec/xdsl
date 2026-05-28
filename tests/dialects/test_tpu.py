@@ -17,7 +17,6 @@ from xdsl.dialects.builtin import (
 from xdsl.dialects.tpu import (
     TPU,
     DelayOp,
-    DotDimensionNumbersAttr,
     Float8EXMYType,
     PackFormat,
     PackFormatAttr,
@@ -30,53 +29,59 @@ from xdsl.dialects.tpu import (
     TraceValueOp,
     YieldOp,
 )
+from xdsl.dialects.tpu_matmul import DotDimensionNumbersAttr
 from xdsl.ir import Block, Region
 from xdsl.parser import Parser
 from xdsl.printer import Printer
 from xdsl.utils.exceptions import VerifyException
 from xdsl.utils.test_value import create_ssa_value
 
+
 def _i64_array(*values: int) -> ArrayAttr[IntegerAttr[IntegerType]]:
     return ArrayAttr([IntegerAttr(v, i64) for v in values])
+
 
 def test_pipeline_mode_attr_round_trip():
     ctx = Context()
     ctx.load_dialect(TPU)
 
     attr = PipelineModeAttr(PipelineMode.Synchronous)
-    
+
     output = io.StringIO()
     Printer(stream=output).print_attribute(attr)
     printed = output.getvalue()
-    
+
     parsed = Parser(ctx, printed).parse_attribute()
     assert parsed == attr
+
 
 def test_pack_format_attr_round_trip():
     ctx = Context()
     ctx.load_dialect(TPU)
 
     attr = PackFormatAttr(PackFormat.Interleaved)
-    
+
     output = io.StringIO()
     Printer(stream=output).print_attribute(attr)
     printed = output.getvalue()
-    
+
     parsed = Parser(ctx, printed).parse_attribute()
     assert parsed == attr
+
 
 def test_float8_exmy_type_round_trip():
     ctx = Context()
     ctx.load_dialect(TPU)
 
     ty = Float8EXMYType(Float32Type())
-    
+
     output = io.StringIO()
     Printer(stream=output).print_attribute(ty)
     printed = output.getvalue()
-    
+
     parsed = Parser(ctx, printed).parse_type()
     assert parsed == ty
+
 
 def test_dot_dimension_numbers_construction():
     attr = DotDimensionNumbersAttr(
@@ -109,6 +114,7 @@ def test_dot_dimension_numbers_field_values():
     assert vals(attr.output_dim_order) == [6, 7, 8]
     assert vals(attr.lhs_batch_dims) == []
 
+
 def test_yield_op_empty():
     op = YieldOp()
     assert isinstance(op, YieldOp)
@@ -128,6 +134,7 @@ def test_yield_op_with_multiple_values():
     v3 = create_ssa_value(VectorType(i32, [4]))
     op = YieldOp(v1, v2, v3)
     assert len(op.arguments) == 3
+
 
 def test_region_op_basic_i32_result():
     val = create_ssa_value(i32)
@@ -155,9 +162,12 @@ def test_region_op_rejects_invalid_result_type():
     val = create_ssa_value(i32)
     region = Region([Block([YieldOp(val)])])
     op = RegionOp(
-        result_types=[StringAttr("not_a_type").type if False else Float8EXMYType(f32)], region=region)
+        result_types=[StringAttr("not_a_type").type if False else Float8EXMYType(f32)],
+        region=region,
+    )
     with pytest.raises(VerifyException, match="must be a float, int"):
         op.verify()
+
 
 def test_trace_op_construction():
     val = create_ssa_value(i32)
@@ -207,10 +217,12 @@ def test_trace_value_op_with_f32():
     op = TraceValueOp(val, "my_float")
     assert op.value.type == f32
 
+
 def test_delay_op_construction():
     nanos = create_ssa_value(i32)
     op = DelayOp(nanos)
     assert op.nanos.type == i32
+
 
 def test_round_trip_trace_start_stop():
     from xdsl.dialects.builtin import Builtin
@@ -248,15 +260,14 @@ def test_round_trip_delay():
     module.verify()
 
 
-
 def test_round_trip_trace_value():
     from xdsl.dialects.arith import Arith
     from xdsl.dialects.builtin import Builtin
 
     ctx = Context()
     ctx.load_dialect(Builtin)
-    ctx.load_dialect(TPU)
     ctx.load_dialect(Arith)
+    ctx.load_dialect(TPU)
 
     text = """
     builtin.module {

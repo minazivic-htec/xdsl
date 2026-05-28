@@ -36,6 +36,7 @@ class CanonicalizePass(ModulePass):
     name = "canonicalize"
 
     def apply(self, ctx: Context, op: builtin.ModuleOp) -> None:
+        # treba ovde flag na true za fold
         pattern = GreedyRewritePatternApplier(
             [RemoveUnusedOperations(), CanonicalizationRewritePattern()]
         )
