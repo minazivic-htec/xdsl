@@ -52,6 +52,19 @@ class ReshapeHasCanonicalizationPatternsTrait(HasCanonicalizationPatternsTrait):
         return (ReshapeOfReshape(),)
 
 
+class UnrollVectorsHasCanonicalizationPatternsTrait(HasCanonicalizationPatternsTrait):
+    @classmethod
+    def get_canonicalization_patterns(cls):
+        from xdsl.transforms.canonicalization_patterns.tpu import UnrollOfRollCancel
+        return (UnrollOfRollCancel(),)
+
+class DynamicGatherHasCanonicalizationPatternsTrait(HasCanonicalizationPatternsTrait):
+    @classmethod
+    def get_canonicalization_patterns(cls):
+        from xdsl.transforms.canonicalization_patterns.tpu import DynamicGatherToBroadcast
+        return (DynamicGatherToBroadcast(),)
+
+
 si32 = IntegerType(32, Signedness.SIGNED)
 
 
@@ -485,7 +498,7 @@ class DynamicGatherOp(IRDLOperation):
     dimensions = attr_def(DenseArrayBase.constr(i32))
     output = result_def(VectorType)
 
-    traits = traits_def(Pure())
+    traits = traits_def(Pure(), DynamicGatherHasCanonicalizationPatternsTrait())
 
     assembly_format = "$source `[` $indices `]` `in` $dimensions attr-dict `:` type($source) `,` type($indices) `->` type($output)"
 
@@ -630,7 +643,7 @@ class UnrollVectorsOp(IRDLOperation):
     input = operand_def(VectorType)
     output = var_result_def(VectorType)
 
-    traits = traits_def(Pure())
+    traits = traits_def(Pure(), UnrollVectorsHasCanonicalizationPatternsTrait())
 
     assembly_format = "$input attr-dict `:` type($input) `->` type($output)"
 

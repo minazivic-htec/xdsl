@@ -10,6 +10,7 @@ from xdsl.dialect_interfaces.constant_materialization import (
 from xdsl.dialects.builtin import (
     AnyFloat,
     AnyFloatConstr,
+    BFloat16Type,
     ContainerOf,
     DenseIntOrFPElementsAttr,
     DenseResourceAttr,
@@ -69,7 +70,7 @@ from xdsl.utils.type import get_element_type_or_self, have_compatible_shape
 
 boolLike = ContainerOf(IntegerType(1))
 signlessIntegerLike = ContainerOf(AnyOf([IntegerType, IndexType]))
-floatingPointLike = ContainerOf(AnyOf([Float16Type, Float32Type, Float64Type]))
+floatingPointLike = ContainerOf(AnyOf([BFloat16Type, Float16Type, Float32Type, Float64Type]))
 
 
 CMPI_COMPARISON_OPERATIONS = [

@@ -30,9 +30,14 @@ from xdsl.irdl.operations import (
     traits_def,
     var_operand_def,
 )
-from xdsl.traits import Pure, SameOperandsAndResultType
+from xdsl.traits import HasCanonicalizationPatternsTrait, Pure, SameOperandsAndResultType
 from xdsl.utils.exceptions import VerifyException
 
+class UnpackSubelementsHasCanonicalizationPatternsTrait(HasCanonicalizationPatternsTrait):
+    @classmethod
+    def get_canonicalization_patterns(cls):
+        from xdsl.transforms.canonicalization_patterns.tpu import UnpackOfPackCancel, UnpackOfPackSignExtensionDemote
+        return (UnpackOfPackCancel(),UnpackOfPackSignExtensionDemote())
 
 def _verify_pack_op(
     op_name: str,
@@ -122,7 +127,7 @@ class UnpackSubelementsOp(IRDLOperation):
 
     output = result_def(VectorType)
 
-    traits = traits_def(Pure())
+    traits = traits_def(Pure(), UnpackSubelementsHasCanonicalizationPatternsTrait())
 
     assembly_format = (
         "$source `,` $index attr-dict `:` type($source) `->` type($output)"

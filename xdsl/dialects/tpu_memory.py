@@ -1,21 +1,3 @@
-# TPU memory ops: load/store variants
-
-# Conventions inherited from the rest of the dialect:
-#   - VectorType / MemRefType used loosely (vector non-zero-rank is not
-#     enforced; element-type predicates from the .td are sometimes loose
-#     where the verifier picks up the slack).
-#   - DenseBoolArrayAttr -> DenseArrayBase.constr(i1)
-#   - DenseI32ArrayAttr  -> DenseArrayBase.constr(i32)
-#   - Variadic<Index>    -> var_operand_def(IndexType)
-#   - DefaultMemRead     -> MemoryReadEffect()
-#   - DefaultMemWrite    -> MemoryWriteEffect()
-
-
-# Three template helpers from tpu_ops.cc are ported as module-level
-# functions: _verify_load_op_common, _verify_store_op_common, and
-# _verify_strided_op_common. Per-op verify_ methods do op-specific
-# checks (right number of indices, etc.) and then call the helper.
-
 from collections.abc import Sequence
 
 from xdsl.dialects.builtin import (
@@ -47,7 +29,7 @@ from xdsl.irdl.operations import (
     traits_def,
     var_operand_def,
 )
-from xdsl.traits import MemoryReadEffect, MemoryWriteEffect
+from xdsl.traits import HasCanonicalizationPatternsTrait, MemoryReadEffect, MemoryWriteEffect
 from xdsl.utils.exceptions import VerifyException
 
 
@@ -163,9 +145,19 @@ def _verify_strided_op_common(
                 f"{op_name}: Strides[{i}]={s} must be >= {min_stride}"
             )
 
+class ShuffledLoadHasCanonicalizationPatternsTrait(HasCanonicalizationPatternsTrait):
+    @classmethod
+    def get_canonicalization_patterns(cls):
+        from xdsl.transforms.canonicalization_patterns.tpu import ShuffledLoadToSimpleLoad
+        return (ShuffledLoadToSimpleLoad(),)
+    
 
-# ----------- operacije -------------
-
+class ShuffledStoreHasCanonicalizationPatternsTrait(HasCanonicalizationPatternsTrait):
+    @classmethod
+    def get_canonicalization_patterns(cls):
+        from xdsl.transforms.canonicalization_patterns.tpu import ShuffledStoreToSimpleStore
+        return (ShuffledStoreToSimpleStore(),)
+    
 
 @irdl_op_definition
 class LoadOp(IRDLOperation):
@@ -173,7 +165,6 @@ class LoadOp(IRDLOperation):
     base = operand_def(MemRefType)
     indices = var_operand_def(IndexType)
     sublane_mask = opt_attr_def(DenseArrayBase.constr(i1))
-    # moze i opcioniopt_attr_def je jer ima default vrednost, pa moze i da se ne navede vec da se ta vrednost koristi
     sublane_stride = attr_def(IntegerAttr[I32])
     result = result_def(VectorType)
 
@@ -191,8 +182,6 @@ class LoadOp(IRDLOperation):
     ):
         if isinstance(sublane_stride, int):
             sublane_stride = IntegerAttr(sublane_stride, i32)
-        # if sublane_stride is not None:
-        #     attrs["sublane_stride"] = sublane_stride
         super().__init__(
             operands=[base, list(indices)],
             result_types=[result_type],
@@ -209,7 +198,7 @@ class StoreOp(IRDLOperation):
     sublane_mask = attr_def(DenseArrayBase.constr(i1))
     mask = (
         opt_operand_def()
-    )  # verifier ce posle proveriti da li je vektor, tkd mozd ovde moze i vectortype
+    )
     sublane_stride = opt_attr_def(IntegerAttr[I32])
     add = attr_def(BoolAttr)
 
@@ -443,7 +432,7 @@ class ShuffledLoadOp(IRDLOperation):
     sublane_offsets = attr_def(DenseArrayBase.constr(i32))
     result = result_def(VectorType)
 
-    traits = traits_def(MemoryReadEffect())
+    traits = traits_def(MemoryReadEffect(), ShuffledLoadHasCanonicalizationPatternsTrait())
 
     assembly_format = (
         "$base `[` $indices `]` attr-dict `:` type($base) `,` type($result)"
@@ -492,8 +481,6 @@ class ShuffledLoadOp(IRDLOperation):
                 f"tpu.shuffled_load: Expected sublane offsets size equals to {first_dim} but got {len(sublane_offset_vals)}"
             )
 
-        # TODO canonicalizer
-
 
 @irdl_op_definition
 class ShuffledStoreOp(IRDLOperation):
@@ -504,7 +491,7 @@ class ShuffledStoreOp(IRDLOperation):
     sublane_mask = attr_def(DenseArrayBase.constr(i1))
     sublane_offsets = attr_def(DenseArrayBase.constr(i32))
 
-    traits = traits_def(MemoryWriteEffect())
+    traits = traits_def(MemoryWriteEffect(), ShuffledStoreHasCanonicalizationPatternsTrait())
 
     assembly_format = "$base `[` $indices `]` `,` $value_to_store attr-dict `:` type($base) `,` type($value_to_store)"
 
@@ -555,8 +542,6 @@ class ShuffledStoreOp(IRDLOperation):
             raise VerifyException(
                 f"tpu.shuffled_store: Expected sublane offset mask size equals to {first_dim} but got {len(sublane_mask_vals)}"
             )
-
-        # TODO canonicalizer
 
 
 @irdl_op_definition
@@ -683,3 +668,4 @@ class VectorStoreIdxOp(IRDLOperation):
 
         mask = self.mask
         _verify_store_op_common("tpu.vector_store_idx", ref_ty, value_ty, mask)
+        

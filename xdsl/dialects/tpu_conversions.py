@@ -1,13 +1,18 @@
 
 from enum import auto
 
+from xdsl.dialects import arith
 from xdsl.dialects.builtin import (
     AnyFloatConstr,
     BoolAttr,
+    DenseIntOrFPElementsAttr,
     Float32Type,
+    FloatAttr,
     IntegerType,
+    ShapedType,
     VectorType,
 )
+from xdsl.interfaces import HasFolderInterface
 from xdsl.ir.core import (
     Attribute,
     EnumAttribute,
@@ -25,7 +30,7 @@ from xdsl.irdl.operations import (
     result_def,
     traits_def,
 )
-from xdsl.traits import Pure, SameOperandsAndResultType
+from xdsl.traits import HasCanonicalizationPatternsTrait, Pure, SameOperandsAndResultType
 from xdsl.utils.exceptions import VerifyException
 from xdsl.utils.str_enum import StrEnum
 
@@ -48,6 +53,47 @@ class RoundingModeAttr(EnumAttribute[RoundingMode], SpacedOpaqueSyntaxAttribute)
     name = "tpu.rounding_mode"
     enum_type = RoundingMode
 
+
+def _fold_float_conversion(input_value, out_type):
+    producer = input_value.owner
+    if not isinstance(producer, arith.ConstantOp):
+        return None
+    attr = producer.value
+
+    if isinstance(out_type, ShapedType):
+        target_elem_type = out_type.element_type
+    else:
+        target_elem_type = out_type
+
+    if isinstance(attr, FloatAttr):
+        py_val = attr.value.data
+        try:
+            return FloatAttr(py_val, target_elem_type)
+        except (NotImplementedError, ValueError):
+            return None
+
+    if isinstance(attr, DenseIntOrFPElementsAttr):
+        if not isinstance(out_type, ShapedType):
+            return None
+        source_elem_type = attr.type.element_type
+        n_elements = len(attr)
+        try:
+            py_values = list(source_elem_type.unpack(attr.data.data, n_elements))
+        except (NotImplementedError, ValueError, AttributeError):
+            return None
+        try:
+            return DenseIntOrFPElementsAttr.from_list(out_type, py_values)
+        except (NotImplementedError, ValueError):
+            return None
+
+    return None
+
+class FPToSIHasCanonicalizationPatternsTrait(HasCanonicalizationPatternsTrait):
+    @classmethod
+    def get_canonicalization_patterns(cls):
+        from xdsl.transforms.canonicalization_patterns.tpu import FPToSISinkRoundEven
+        return (FPToSISinkRoundEven(),)
+
 @irdl_op_definition
 class FPToSIOp(IRDLOperation):
     name = "tpu.fptosi"
@@ -55,7 +101,7 @@ class FPToSIOp(IRDLOperation):
     rounding_mode = attr_def(RoundingModeAttr)
     output = result_def(_AnySignlessIntegerLike)
 
-    traits = traits_def(Pure())
+    traits = traits_def(Pure(), FPToSIHasCanonicalizationPatternsTrait())
 
     assembly_format = "$input attr-dict `:` type($input) `->` type($output) "
 
@@ -72,8 +118,6 @@ class FPToSIOp(IRDLOperation):
             result_types=[target_type],
             attributes={"rounding_mode": rounding_mode}
         )
-
-        #TODO canonicalizer
 
 @irdl_op_definition
 class FPToUIOp(IRDLOperation):
@@ -100,7 +144,6 @@ class FPToUIOp(IRDLOperation):
             attributes={"rounding_mode": rounding_mode}
         )
 
-    #TODO: canonicalizer
 
 @irdl_op_definition
 class SIToFPOp(IRDLOperation):
@@ -126,8 +169,6 @@ class SIToFPOp(IRDLOperation):
             result_types=[target_type],
             attributes={"rounding_mode": rounding_mode}
         )
-
-    #TODO: canonicalizer
 
 @irdl_op_definition
 class UIToFPOp(IRDLOperation):
@@ -155,7 +196,7 @@ class UIToFPOp(IRDLOperation):
         )
 
 @irdl_op_definition
-class ExtFOp(IRDLOperation):
+class ExtFOp(IRDLOperation, HasFolderInterface):
     name = "tpu.extf"
     input = operand_def(_AnyFloatLike)
     out = result_def(_AnyFloatLike)
@@ -173,11 +214,15 @@ class ExtFOp(IRDLOperation):
             operands=[input_],
             result_types=[target_type],
         )
-    #TODO: fold
 
+    def fold(self):
+        new_attr = _fold_float_conversion(self.input, self.out.type)
+        if new_attr is None:
+            return None
+        return (new_attr,)
 
 @irdl_op_definition
-class TruncFOp(IRDLOperation):
+class TruncFOp(IRDLOperation, HasFolderInterface):
     name = "tpu.truncf"
     input = operand_def(_AnyFloatLike)
     rounding_mode = attr_def(RoundingModeAttr)
@@ -201,7 +246,12 @@ class TruncFOp(IRDLOperation):
             attributes={"rounding_mode": rounding_mode}
         )
 
-    #TODO: fold
+
+    def fold(self):
+        new_attr = _fold_float_conversion(self.input, self.out.type)
+        if new_attr is None:
+            return None
+        return (new_attr,)
 
 @irdl_op_definition
 class ReciprocalOp (IRDLOperation):

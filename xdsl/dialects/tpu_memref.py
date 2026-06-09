@@ -116,7 +116,22 @@ class EraseLayoutHasCanonicalizerPatternsTrait(HasCanonicalizationPatternsTrait)
 
         return ((EraseLayoutChainCollapse()),)
 
+class MemRefSliceHasCanonicalizationPatternsTrait(HasCanonicalizationPatternsTrait):
+    @classmethod
+    def get_canonicalization_patterns(cls):
+        from xdsl.transforms.canonicalization_patterns.tpu import (
+            MemRefSliceFoldConstantDynamicDim,
+        )
+        return (MemRefSliceFoldConstantDynamicDim(),)
 
+class MemRefSqueezeHasCanonicalizationPatternsTrait(HasCanonicalizationPatternsTrait):
+    @classmethod
+    def get_canonicalization_patterns(cls):
+        from xdsl.transforms.canonicalization_patterns.tpu import (
+            MemRefSqueezeFoldCast,
+        )
+        return (MemRefSqueezeFoldCast(),)
+    
 @irdl_attr_definition
 class MemorySpaceAttr(ParametrizedAttribute):
     name = "tpu.memory_space"
@@ -234,7 +249,7 @@ class MemRefSliceOp(IRDLOperation, HasFolderInterface):
     result = result_def(MemRefType)
 
     irdl_options = (AttrSizedOperandSegments(),)
-    traits = traits_def(Pure())
+    traits = traits_def(Pure(), MemRefSliceHasCanonicalizationPatternsTrait(),)
 
     assembly_format = "$mem_ref `[` $base_idx `]` (`<` $dynamic_sizes^ `>`)? attr-dict `:` type($mem_ref) `->` type($result)"
 
@@ -295,7 +310,7 @@ class MemRefSqueezeOp(IRDLOperation):
     input = operand_def(MemRefType)
     result = result_def(MemRefType)
 
-    traits = traits_def(Pure())
+    traits = traits_def(Pure(), MemRefSqueezeHasCanonicalizationPatternsTrait(),)
 
     assembly_format = "$input attr-dict `:` type($input) `->` type($result)"
 

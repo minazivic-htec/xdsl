@@ -36,12 +36,9 @@ from xdsl.traits import Pure
 from xdsl.utils.exceptions import VerifyException
 from xdsl.utils.str_enum import StrEnum
 
-
 class ContractPrecision(StrEnum):
     Bf16 = auto()
     Fp32 = auto()
-
-
 @irdl_attr_definition
 class ContractPrecisionAttr(
     EnumAttribute[ContractPrecision], SpacedOpaqueSyntaxAttribute
@@ -49,9 +46,7 @@ class ContractPrecisionAttr(
     name = "tpu.contract_precision"
     enum_type = ContractPrecision
 
-
 I64ArrayAttr = ArrayAttr[IntegerAttr[I64]]
-
 
 def _parse_i64_array(parser: AttrParser) -> I64ArrayAttr:
     parser.parse_punctuation("[")
@@ -148,7 +143,7 @@ class DotDimensionNumbersAttr(ParametrizedAttribute):
 
 def _element_bitwidth(elem: Attribute) -> int:
     if isinstance(elem, IntegerType):
-        return elem.width.type
+        return elem.width.data
     name = elem.name
     if name in ("f16", "bf16"):
         return 16
@@ -159,8 +154,7 @@ def _element_bitwidth(elem: Attribute) -> int:
     if name in ("f8E5M2", "f8E4M3"):
         return 8
     raise VerifyException(f"Unknown element-type bitwidth for {elem}")
-
-
+    
 @irdl_op_definition
 class MatmulOp(IRDLOperation):
     name = "tpu.matmul"

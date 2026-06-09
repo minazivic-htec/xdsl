@@ -5,6 +5,7 @@ from xdsl.pattern_rewriter import (
     GreedyRewritePatternApplier,
     PatternRewriteWalker,
 )
+from xdsl.transforms.canonicalization_patterns.tpu import CanonicalizeAddFOfMatmul, CanonicalizeAddIOfMatmul
 from xdsl.transforms.canonicalize import CanonicalizationRewritePattern
 from xdsl.transforms.dead_code_elimination import (
     RemoveUnusedOperations,
@@ -18,7 +19,12 @@ class TpuCanonicalizePass(ModulePass):
     def apply(self, ctx: Context, op: builtin.ModuleOp) -> None:
         PatternRewriteWalker(
             GreedyRewritePatternApplier(
-                [RemoveUnusedOperations(), CanonicalizationRewritePattern()],
+                [
+                    RemoveUnusedOperations(),
+                    CanonicalizationRewritePattern(),
+                    CanonicalizeAddFOfMatmul(),
+                    CanonicalizeAddIOfMatmul(),
+                    ],
                 folding_enabled=True,
                 ctx=ctx,
             ),

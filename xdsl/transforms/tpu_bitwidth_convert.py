@@ -2,8 +2,33 @@ from dataclasses import dataclass
 
 from xdsl.context import Context
 from xdsl.dialects import builtin
-from xdsl.dialects.arith import ExtFOp, TruncFOp
+from xdsl.dialects.arith import (
+    AddfOp,
+    DivfOp,
+    ExtFOp,
+    MaximumfOp,
+    MinimumfOp,
+    MulfOp,
+    NegfOp,
+    SelectOp,
+    SubfOp,
+    TruncFOp,
+)
 from xdsl.dialects.builtin import VectorType, bf16, f32
+from xdsl.dialects.math import (
+    AbsFOp,
+    CosOp,
+    ExpOp,
+    Log1pOp,
+    LogOp,
+    PowFOp,
+    RoundEvenOp,
+    RoundOp,
+    RsqrtOp,
+    SinOp,
+    SqrtOp,
+    TanhOp,
+)
 from xdsl.dialects.vector import MultiDimReductionOp
 from xdsl.passes import ModulePass
 from xdsl.pattern_rewriter import (
@@ -16,37 +41,26 @@ from xdsl.pattern_rewriter import (
 from xdsl.utils.hints import isa
 
 
-# pravilo
+def _is_bf16_vector(t) -> bool:
+    return isa(t, VectorType) and t.element_type == bf16
+
+
 class MultiReductionBitwidthConvert(RewritePattern):
-    # MultiDimReductionBitwidthConvert iz jax
-
-    # uzme bf16 vector.multi_reduction pa se u f32 extenduje source i acc bf16 -> f32, reduce u f32, i truncate
-    # f32 rez nazad u bf16.
-
-    # ext_src = arith.extf(source) : bf16 vec -> f32 vec
-    # ext_acc = arith.extf(acc)    : bf16 vec -> f32 vec
-    # red     = vector.multi_reduction(ext_src, ext_acc, kind, dims)
-
     @op_type_rewrite_pattern
     def match_and_rewrite(
         self, op: MultiDimReductionOp, rewriter: PatternRewriter
     ) -> None:
         src_ty = op.source.type
-        # samo bf16 redukcije
-        if not (isa(src_ty, VectorType) and src_ty.element_type == bf16):
+        if not _is_bf16_vector(src_ty):
             return
         res_ty = op.dest.type
         if not isa(res_ty, VectorType):
             return
 
-        # source bf16 -> f32
         src_f32_ty = VectorType(f32, src_ty.get_shape())
         ext_src = ExtFOp(op.source, src_f32_ty)
-
-        # acc bf16 -> f32
         acc_f32_ty = VectorType(f32, res_ty.get_shape())
         ext_acc = ExtFOp(op.acc, acc_f32_ty)
-
         new_reduction = MultiDimReductionOp(
             ext_src.result,
             ext_acc.result,
@@ -54,19 +68,88 @@ class MultiReductionBitwidthConvert(RewritePattern):
             op.reduction_dims,
             acc_f32_ty,
         )
-
-        # f32 result nazad u bf16
         trunc = TruncFOp(new_reduction.dest, res_ty)
-
         rewriter.replace_matched_op([ext_src, ext_acc, new_reduction, trunc])
 
 
-# pass
+_UNARY_BF16_OPS = (
+    AbsFOp,
+    CosOp,
+    ExpOp,
+    Log1pOp,
+    LogOp,
+    RoundEvenOp,
+    RoundOp,
+    RsqrtOp,
+    SinOp,
+    SqrtOp,
+    TanhOp,
+    NegfOp,
+)
+
+_BINARY_BF16_OPS = (
+    AddfOp,
+    SubfOp,
+    MulfOp,
+    DivfOp,
+    MaximumfOp,
+    MinimumfOp,
+    PowFOp,
+)
+
+
+class GenericBitwidthConvert(RewritePattern):
+    def match_and_rewrite(self, op, rewriter: PatternRewriter) -> None:
+        result_ty = getattr(op, "result", None)
+        result_ty = result_ty.type if result_ty is not None else None
+        if not _is_bf16_vector(result_ty):
+            return
+
+        if isinstance(op, _UNARY_BF16_OPS):
+            operand_ty = op.operand.type
+            if not _is_bf16_vector(operand_ty):
+                return
+            ext = ExtFOp(op.operand, VectorType(f32, operand_ty.get_shape()))
+            new_op = type(op)(ext.result)
+            trunc = TruncFOp(new_op.result, result_ty)
+            rewriter.replace_matched_op([ext, new_op, trunc])
+            return
+
+        if isinstance(op, _BINARY_BF16_OPS):
+            lhs_ty = op.lhs.type
+            rhs_ty = op.rhs.type
+            if not (_is_bf16_vector(lhs_ty) and _is_bf16_vector(rhs_ty)):
+                return
+            ext_lhs = ExtFOp(op.lhs, VectorType(f32, lhs_ty.get_shape()))
+            ext_rhs = ExtFOp(op.rhs, VectorType(f32, rhs_ty.get_shape()))
+            new_op = type(op)(ext_lhs.result, ext_rhs.result)
+            trunc = TruncFOp(new_op.result, result_ty)
+            rewriter.replace_matched_op([ext_lhs, ext_rhs, new_op, trunc])
+            return
+
+        if isinstance(op, SelectOp):
+            lhs_ty = op.lhs.type
+            rhs_ty = op.rhs.type
+            if not (_is_bf16_vector(lhs_ty) and _is_bf16_vector(rhs_ty)):
+                return
+            ext_lhs = ExtFOp(op.lhs, VectorType(f32, lhs_ty.get_shape()))
+            ext_rhs = ExtFOp(op.rhs, VectorType(f32, rhs_ty.get_shape()))
+            new_sel = SelectOp(op.cond, ext_lhs.result, ext_rhs.result)
+            trunc = TruncFOp(new_sel.result, result_ty)
+            rewriter.replace_matched_op([ext_lhs, ext_rhs, new_sel, trunc])
+            return
+
+
 @dataclass(frozen=True)
 class TpuBitwidthConvertPass(ModulePass):
     name = "tpu-bitwidth-convert"
 
     def apply(self, ctx: Context, op: builtin.ModuleOp) -> None:
         PatternRewriteWalker(
-            GreedyRewritePatternApplier([MultiReductionBitwidthConvert()])
+            GreedyRewritePatternApplier(
+                [
+                    MultiReductionBitwidthConvert(),
+                    GenericBitwidthConvert(),
+                ]
+            )
         ).rewrite_module(op)
