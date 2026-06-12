@@ -1,18 +1,17 @@
 from collections.abc import Sequence
 from enum import auto
 
-from xdsl.dialect_interfaces.constant_materialization import ConstantMaterializationInterface
+from xdsl.dialect_interfaces.constant_materialization import (
+    ConstantMaterializationInterface,
+)
 from xdsl.dialects import arith
 from xdsl.dialects.builtin import (
     I32,
     AnyFloat,
     AnyFloatConstr,
-    ArrayAttr,
     IndexType,
-    IntAttr,
     IntegerAttr,
     IntegerType,
-    MemRefLayoutAttr,
     StringAttr,
     VectorType,
     f32,
@@ -71,6 +70,7 @@ from xdsl.dialects.tpu_memref import (
     MemRefSqueezeOp,
     ReinterpretCastOp,
     SemaphoreType,
+    TiledLayoutAttr,
 )
 from xdsl.dialects.tpu_pack import (
     CreateMaskOp,
@@ -114,7 +114,6 @@ from xdsl.ir import (
     SpacedOpaqueSyntaxAttribute,
     TypeAttribute,
 )
-from xdsl.ir.affine.affine_map import AffineMap
 from xdsl.ir.core import Attribute, Block, Region, SSAValue
 from xdsl.irdl import irdl_attr_definition, irdl_op_definition
 from xdsl.irdl.attributes import param_def
@@ -164,112 +163,6 @@ class Float8EXMYType(ParametrizedAttribute, TypeAttribute):
         with printer.in_angle_brackets():
             printer.print_attribute(self.underlying_type)
 
-            
-@irdl_attr_definition
-class TiledLayoutAttr(MemRefLayoutAttr, ParametrizedAttribute):
-    name = "tpu.tiled"
-
-    tiles: ArrayAttr[ArrayAttr[IntAttr]]
-    tile_strides: ArrayAttr[IntAttr]
-
-    def __init__(
-        self,
-        tiles: Sequence[Sequence[int]] | ArrayAttr[ArrayAttr[IntAttr]],
-        tile_strides: Sequence[int] | ArrayAttr[IntAttr],
-    ):
-        if not isinstance(tiles, ArrayAttr):
-            tiles = ArrayAttr(
-                [ArrayAttr([IntAttr(dim) for dim in tile]) for tile in tiles]
-            )
-        if not isinstance(tile_strides, ArrayAttr):
-            tile_strides = ArrayAttr([IntAttr(s) for s in tile_strides])
-        super().__init__(tiles, tile_strides)
-
-    @classmethod
-    def parse_parameters(cls, parser):
-        parser.parse_punctuation("<")
-        tiles_list: list[list[int]] = []
-        while parser.parse_optional_punctuation("(") is not None:
-            dims: list[int] = [parser.parse_integer()]
-            while parser.parse_optional_punctuation(",") is not None:
-                dims.append(parser.parse_integer())
-            parser.parse_punctuation(")")
-            tiles_list.append(dims)
-        if not tiles_list:
-            parser.raise_error("Expected at least one tile in TiledLayoutAttr")
-        parser.parse_punctuation(",")
-        strides_list = parser.parse_comma_separated_list(
-            parser.Delimiter.SQUARE, parser.parse_integer
-        )
-        parser.parse_punctuation(">")
-        tiles_attr = ArrayAttr(
-            [ArrayAttr([IntAttr(d) for d in t]) for t in tiles_list]
-        )
-        strides_attr = ArrayAttr([IntAttr(s) for s in strides_list])
-        return [tiles_attr, strides_attr]
-
-    def print_parameters(self, printer) -> None:
-        with printer.in_angle_brackets():
-            for tile in self.tiles.data:
-                printer.print_string("(")
-                printer.print_list(
-                    tile.data,
-                    lambda d: printer.print_string(str(d.data)),
-                )
-                printer.print_string(")")
-            printer.print_string(",")
-            with printer.in_square_brackets():
-                printer.print_list(
-                    self.tile_strides.data,
-                    lambda s: printer.print_string(str(s.data)),
-                )
-
-    def get_affine_map(self) -> AffineMap:
-        from xdsl.ir.affine import (
-            AffineConstantExpr,
-            AffineDimExpr,
-            AffineMap,
-        )
-
-        if len(self.tiles.data) != 1:
-            raise NotImplementedError(
-                "TiledLayoutAttr.get_affine_map: multi-level tiling (more "
-                "than one tile in the layout) is not implemented. The "
-                "single-tile case is supported. Multi-level support "
-                "requires modeling `getExpandedShape`/`getExpandedStrides` "
-                "from mosaic util.cc and is documented as future work."
-            )
-
-        tile = [d.data for d in self.tiles.data[0].data]
-        strides = [s.data for s in self.tile_strides.data]
-        rank = len(tile)
-
-        if len(strides) != rank:
-            raise NotImplementedError(
-                f"TiledLayoutAttr.get_affine_map: tile rank {rank} does not "
-                f"match tile_strides rank {len(strides)}. This implementation "
-                "supports only equal-rank tile and strides (the common case); "
-                "mixed-rank layouts are documented future work."
-            )
-
-        inner_prods = [1] * rank
-        for d in range(rank - 2, -1, -1):
-            inner_prods[d] = inner_prods[d + 1] * tile[d + 1]
-
-        result = AffineConstantExpr(0)
-        for d in range(rank):
-            t_d = tile[d]
-            s_d = strides[d]
-            ip = inner_prods[d]
-
-            i_d = AffineDimExpr(d)
-            tile_idx = i_d // AffineConstantExpr(t_d)
-            inner_idx = i_d % AffineConstantExpr(t_d)
-
-            result = result + tile_idx * AffineConstantExpr(s_d * ip)
-            result = result + inner_idx * AffineConstantExpr(ip)
-
-        return AffineMap(rank, 0, (result,))
 
 class PipelineMode(StrEnum):
     Synchronous = auto()
@@ -330,9 +223,8 @@ class PackFormatAttr(EnumAttribute[PackFormat], SpacedOpaqueSyntaxAttribute):
 
 class TpuConstantMaterializationInterface(ConstantMaterializationInterface):
     def materialize_constant(self, value, type):
-        return arith.ConstantOp.build(
-            properties={"value": value}, result_types=(type,)
-        )
+        return arith.ConstantOp.build(properties={"value": value}, result_types=(type,))
+
 
 @irdl_op_definition
 class YieldOp(IRDLOperation):
@@ -543,7 +435,5 @@ TPU = Dialect(
         ReductionKindAttr,
         TiledLayoutAttr,
     ],
-    [
-        TpuConstantMaterializationInterface()
-    ]
+    [TpuConstantMaterializationInterface()],
 )

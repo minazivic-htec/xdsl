@@ -3,13 +3,18 @@ from enum import auto
 
 from xdsl.dialects.builtin import (
     DYNAMIC_INDEX,
+    ArrayAttr,
     FixedBitwidthType,
+    IntAttr,
+    MemRefLayoutAttr,
     MemRefType,
     NoneAttr,
     i32,
 )
 from xdsl.dialects.func import FuncOp
 from xdsl.interfaces import HasFolderInterface
+from xdsl.ir.affine.affine_expr import AffineConstantExpr, AffineDimExpr
+from xdsl.ir.affine.affine_map import AffineMap
 from xdsl.ir.core import (
     Attribute,
     Data,
@@ -107,6 +112,146 @@ class _MemorySpaceData(Data[MemorySpace]):
         printer.print_identifier_or_string_literal(str(self.data))
 
 
+@irdl_attr_definition
+class TiledLayoutAttr(MemRefLayoutAttr, ParametrizedAttribute):
+    name = "tpu.tiled"
+
+    tiles: ArrayAttr[ArrayAttr[IntAttr]]
+    tile_strides: ArrayAttr[IntAttr]
+
+    def __init__(
+        self,
+        tiles: Sequence[Sequence[int]] | ArrayAttr[ArrayAttr[IntAttr]],
+        tile_strides: Sequence[int] | ArrayAttr[IntAttr],
+    ):
+        if not isinstance(tiles, ArrayAttr):
+            tiles = ArrayAttr(
+                [ArrayAttr([IntAttr(dim) for dim in tile]) for tile in tiles]
+            )
+        if not isinstance(tile_strides, ArrayAttr):
+            tile_strides = ArrayAttr([IntAttr(s) for s in tile_strides])
+        super().__init__(tiles, tile_strides)
+
+    @classmethod
+    def parse_parameters(cls, parser):
+        parser.parse_punctuation("<")
+        tiles_list: list[list[int]] = []
+        while parser.parse_optional_punctuation("(") is not None:
+            dims: list[int] = [parser.parse_integer()]
+            while parser.parse_optional_punctuation(",") is not None:
+                dims.append(parser.parse_integer())
+            parser.parse_punctuation(")")
+            tiles_list.append(dims)
+        if not tiles_list:
+            parser.raise_error("Expected at least one tile in TiledLayoutAttr")
+        parser.parse_punctuation(",")
+        strides_list = parser.parse_comma_separated_list(
+            parser.Delimiter.SQUARE, parser.parse_integer
+        )
+        parser.parse_punctuation(">")
+        tiles_attr = ArrayAttr([ArrayAttr([IntAttr(d) for d in t]) for t in tiles_list])
+        strides_attr = ArrayAttr([IntAttr(s) for s in strides_list])
+        return [tiles_attr, strides_attr]
+
+    def print_parameters(self, printer: Printer) -> None:
+        with printer.in_angle_brackets():
+            for tile in self.tiles.data:
+                printer.print_string("(")
+                printer.print_list(
+                    tile.data,
+                    lambda d: printer.print_string(str(d.data)),
+                )
+                printer.print_string(")")
+            printer.print_string(",")
+            with printer.in_square_brackets():
+                printer.print_list(
+                    self.tile_strides.data,
+                    lambda s: printer.print_string(str(s.data)),
+                )
+
+    def get_rank(self) -> int:
+        return len(self.tile_strides.data)
+
+    def get_num_trailing_dims_with_contiguous_tiles(self, shape: Sequence[int]) -> int:
+        from xdsl.dialects.builtin import DYNAMIC_INDEX
+
+        tiles = self.tiles.data
+        tile_strides = [s.data for s in self.tile_strides.data]
+        n = len(shape)
+
+        first_tile_dims: list[int] = []
+        if tiles:
+            first_tile_dims = [d.data for d in tiles[0].data]
+        first_tile_rank = len(first_tile_dims)
+
+        stride = 1
+        stride_known = True
+        d = n - 1
+        while d >= 0:
+            in_tiled_region = d >= n - first_tile_rank
+            if in_tiled_region and shape[d] != DYNAMIC_INDEX:
+                tile_d = d - (n - first_tile_rank)
+                tile_size = first_tile_dims[tile_d]
+                size_tiles = (shape[d] + tile_size - 1) // tile_size
+                size_tiles_known = True
+            else:
+                size_tiles = shape[d]
+                size_tiles_known = shape[d] != DYNAMIC_INDEX
+
+            if stride_known and size_tiles_known and size_tiles != 1:
+                if stride != tile_strides[d]:
+                    break
+
+            if not stride_known or not size_tiles_known:
+                stride_known = False
+            else:
+                stride *= size_tiles
+
+            d -= 1
+
+        return n - 1 - d
+
+    def tiles_are_known_contiguous(self, shape: Sequence[int]) -> bool:
+        return (
+            self.get_num_trailing_dims_with_contiguous_tiles(shape) == self.get_rank()
+        )
+
+    def get_affine_map(self) -> AffineMap:
+        if len(self.tiles.data) != 1:
+            raise NotImplementedError(
+                "TiledLayoutAttr.get_affine_map: multi-level tiling is not implemented."
+            )
+
+        tile = [d.data for d in self.tiles.data[0].data]
+        strides = [s.data for s in self.tile_strides.data]
+        rank = len(tile)
+
+        if len(strides) != rank:
+            raise NotImplementedError(
+                f"TiledLayoutAttr.get_affine_map: tile rank {rank} does not match tile_strides rank {len(strides)}. "
+                "This implementation supports only equal-rank tile and strides."
+            )
+
+        inner_prods = [1] * rank
+        for d in range(rank - 2, -1, -1):
+            inner_prods[d] = inner_prods[d + 1] * tile[d + 1]
+
+        result = AffineConstantExpr(0)
+        for d in range(rank):
+            t_d = tile[d]
+            s_d = strides[d]
+            ip = inner_prods[d]
+
+            i_d = AffineDimExpr(d)
+            tile_idx = i_d // AffineConstantExpr(t_d)
+            inner_idx = i_d % AffineConstantExpr(t_d)
+
+            result = result + tile_idx * AffineConstantExpr(s_d * ip)
+            result = result + inner_idx * AffineConstantExpr(ip)
+
+        return AffineMap(rank, 0, (result,))
+
+
 class EraseLayoutHasCanonicalizerPatternsTrait(HasCanonicalizationPatternsTrait):
     @classmethod
     def get_canonicalization_patterns(cls) -> tuple[RewritePattern, ...]:
@@ -116,13 +261,16 @@ class EraseLayoutHasCanonicalizerPatternsTrait(HasCanonicalizationPatternsTrait)
 
         return ((EraseLayoutChainCollapse()),)
 
+
 class MemRefSliceHasCanonicalizationPatternsTrait(HasCanonicalizationPatternsTrait):
     @classmethod
     def get_canonicalization_patterns(cls):
         from xdsl.transforms.canonicalization_patterns.tpu import (
             MemRefSliceFoldConstantDynamicDim,
         )
+
         return (MemRefSliceFoldConstantDynamicDim(),)
+
 
 class MemRefSqueezeHasCanonicalizationPatternsTrait(HasCanonicalizationPatternsTrait):
     @classmethod
@@ -130,8 +278,10 @@ class MemRefSqueezeHasCanonicalizationPatternsTrait(HasCanonicalizationPatternsT
         from xdsl.transforms.canonicalization_patterns.tpu import (
             MemRefSqueezeFoldCast,
         )
+
         return (MemRefSqueezeFoldCast(),)
-    
+
+
 @irdl_attr_definition
 class MemorySpaceAttr(ParametrizedAttribute):
     name = "tpu.memory_space"
@@ -240,6 +390,10 @@ def _compute_squeezed_dims(
     return squeezed
 
 
+def _is_acceptable_layout(layout):
+    return isinstance(layout, NoneAttr) or isinstance(layout, TiledLayoutAttr)
+
+
 @irdl_op_definition
 class MemRefSliceOp(IRDLOperation, HasFolderInterface):
     name = "tpu.memref_slice"
@@ -249,7 +403,10 @@ class MemRefSliceOp(IRDLOperation, HasFolderInterface):
     result = result_def(MemRefType)
 
     irdl_options = (AttrSizedOperandSegments(),)
-    traits = traits_def(Pure(), MemRefSliceHasCanonicalizationPatternsTrait(),)
+    traits = traits_def(
+        Pure(),
+        MemRefSliceHasCanonicalizationPatternsTrait(),
+    )
 
     assembly_format = "$mem_ref `[` $base_idx `]` (`<` $dynamic_sizes^ `>`)? attr-dict `:` type($mem_ref) `->` type($result)"
 
@@ -288,10 +445,12 @@ class MemRefSliceOp(IRDLOperation, HasFolderInterface):
 
         src_layout = source_type.layout
         tgt_layout = target_type.layout
-        if not isinstance(src_layout, NoneAttr) or not isinstance(tgt_layout, NoneAttr):
+
+        if not _is_acceptable_layout(src_layout) or not _is_acceptable_layout(
+            tgt_layout
+        ):
             raise VerifyException(
-                "tpu.memref_slice: Not implemented: slice with non-identity "
-                "layouts (TiledLayoutAttr support is pending)."
+                "tpu.memref_slice: Only NoneAttr or TiledLayoutAttr layouts are supported"
             )
 
     def fold(self):
@@ -310,7 +469,10 @@ class MemRefSqueezeOp(IRDLOperation):
     input = operand_def(MemRefType)
     result = result_def(MemRefType)
 
-    traits = traits_def(Pure(), MemRefSqueezeHasCanonicalizationPatternsTrait(),)
+    traits = traits_def(
+        Pure(),
+        MemRefSqueezeHasCanonicalizationPatternsTrait(),
+    )
 
     assembly_format = "$input attr-dict `:` type($input) `->` type($result)"
 
@@ -338,7 +500,35 @@ class MemRefSqueezeOp(IRDLOperation):
                 "tpu.memref_squeeze: Source and target shapes must be the same if no dimensions are squeezed."
             )
 
-    # TODO TiledLayoutAttr provere, canonicalizer
+        src_layout = source_type.layout
+        if not _is_acceptable_layout(src_layout):
+            raise VerifyException(
+                "tpu.memref_squeeze: Only NoneAttr or TiledLayoutAttr layouts are supported."
+            )
+
+        if isinstance(src_layout, TiledLayoutAttr):
+            tiles = src_layout.tiles.data
+            if len(tiles) == 1:
+                first_tile_dims = [d.data for d in tiles[0].data]
+                first_tiled = len(source_shape) - len(first_tile_dims)
+                for dim in squeezed:
+                    if dim >= first_tiled:
+                        tile_idx = dim - first_tiled
+                        if first_tile_dims[tile_idx] != 1:
+                            raise VerifyException(
+                                f"tpu.memref_squeeze: All tiled squeezed dimensions "
+                                f"must be of size 1, but dim {dim} has tile size "
+                                f"{first_tile_dims[tile_idx]}."
+                            )
+            elif len(tiles) >= 2:
+                first_tile_dims = [d.data for d in tiles[0].data]
+                first_tiled = len(source_shape) - len(first_tile_dims)
+                for dim in squeezed:
+                    if dim >= first_tiled:
+                        raise VerifyException(
+                            "tpu.memref_squeeze: When multiple tiles are present, no tiled dimensions can be squeezed, "
+                            "but dim {dim} is in the tiled region."
+                        )
 
 
 @irdl_op_definition
@@ -378,11 +568,58 @@ class MemRefReshapeOp(IRDLOperation):
 
         src_layout = source_type.layout
         tgt_layout = target_type.layout
-        if not isinstance(src_layout, NoneAttr) or not isinstance(tgt_layout, NoneAttr):
+
+        if not _is_acceptable_layout(src_layout) or not _is_acceptable_layout(
+            tgt_layout
+        ):
             raise VerifyException(
-                "tpu.memref_reshape: Not implemented: reshape with non-identity layouts"
-                # TODO with tiled layout attr
+                "tpu.memref_reshape: Only NoneAttr or TiledLayoutAttr layouts are supported"
             )
+
+        src_is_tiled = isinstance(src_layout, TiledLayoutAttr)
+        tgt_is_tiled = isinstance(tgt_layout, TiledLayoutAttr)
+        if src_is_tiled != tgt_is_tiled:
+            raise VerifyException(
+                "tpu.memref_reshape: Source and target must both have a tiled layout, or both have none."
+            )
+
+        if src_is_tiled:
+            if src_layout.tiles != tgt_layout.tiles:
+                raise VerifyException(
+                    "tpu.memref_reshape: Expected the same tiling for the input and output memref."
+                )
+            if len(src_layout.tiles.data) > 0:
+                tile_dims = [d.data for d in src_layout.tiles.data[0].data]
+                if len(tile_dims) != 2:
+                    raise VerifyException(
+                        "tpu.memref_reshape: Not implemented: memref reshape with 1D tiling."
+                    )
+                src_shape = source_type.get_shape()
+                tgt_shape = target_type.get_shape()
+                if not src_layout.tiles_are_known_contiguous(
+                    src_shape
+                ) or not tgt_layout.tiles_are_known_contiguous(tgt_shape):
+                    raise VerifyException(
+                        "tpu.memref_reshape: Not implemented: reshape on a non-contiguous memref."
+                    )
+                src_tiled = src_shape[-2:]
+                tgt_tiled = tgt_shape[-2:]
+                is_src_align_2nd_minor = src_tiled[0] % tile_dims[0] == 0
+                is_src_align_minor = src_tiled[1] % tile_dims[1] == 0
+                is_tgt_align_2nd_minor = tgt_tiled[0] % tile_dims[0] == 0
+                is_tgt_align_minor = tgt_tiled[1] % tile_dims[1] == 0
+
+                if tile_dims[0] == 1 and is_src_align_minor and is_tgt_align_minor:
+                    pass
+                elif tgt_tiled[1] != src_tiled[1]:
+                    raise VerifyException(
+                        "tpu.memref_reshape: Expected the minormost dimension to be unchanged."
+                    )
+                elif tgt_tiled[0] != src_tiled[0]:
+                    if not is_src_align_2nd_minor or not is_tgt_align_2nd_minor:
+                        raise VerifyException(
+                            "tpu.memref_reshape: Expected the 2nd minor dimension to be aligned to the tile."
+                        )
 
 
 @irdl_op_definition
@@ -446,10 +683,32 @@ class MemRefBitcastOp(IRDLOperation, HasFolderInterface):
                         f"tpu.memref_bitcast: Expected the same dim size on dim {i}: {src_dim} vs {tgt_dim}"
                     )
 
-        if not isinstance(target_type.layout, NoneAttr):
+        src_layout = source_type.layout
+        tgt_layout = target_type.layout
+
+        if not _is_acceptable_layout(src_layout) or not _is_acceptable_layout(
+            tgt_layout
+        ):
             raise VerifyException(
-                "tpu.memref_bitcast: Not implemented: bitcast to non-identity layout (TiledLayoutAttr support is pending)."
+                "tpu.memref_bitcast: Only NoneAttr or TiledLayoutAttr layouts are supported."
             )
+
+        src_is_tiled = isinstance(src_layout, TiledLayoutAttr)
+        tgt_is_tiled = isinstance(tgt_layout, TiledLayoutAttr)
+        if src_is_tiled != tgt_is_tiled:
+            raise VerifyException(
+                "tpu.memref_bitcast: Source and target must both have a tiled layout, or both have none."
+            )
+
+        if src_is_tiled:
+            src_tile_dims = [d.data for d in src_layout.tiles.data[0].data]
+            tgt_tile_dims = [d.data for d in tgt_layout.tiles.data[0].data]
+            if src_tile_dims[0] * src_bitwidth != tgt_tile_dims[0] * tgt_bitwidth:
+                raise VerifyException(
+                    f"tpu.memref_bitcast: Invalid memref bitcast. "
+                    f"First tile dim mismatch: ({src_tile_dims[0]} * {src_bitwidth}) "
+                    f"vs ({tgt_tile_dims[0]} * {tgt_bitwidth})."
+                )
 
     def fold(self):
         if self.input.type == self.result.type:
