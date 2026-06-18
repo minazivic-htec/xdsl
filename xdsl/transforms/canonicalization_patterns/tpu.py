@@ -1,13 +1,33 @@
 from xdsl.dialects.arith import AddfOp, AddiOp, ConstantOp
-from xdsl.dialects.builtin import DYNAMIC_INDEX, DenseIntOrFPElementsAttr, FloatAttr, IntegerAttr, IntegerType, MemRefType, Signedness, VectorType
+from xdsl.dialects.builtin import (
+    DYNAMIC_INDEX,
+    DenseIntOrFPElementsAttr,
+    FloatAttr,
+    IntegerAttr,
+    IntegerType,
+    MemRefType,
+    Signedness,
+    VectorType,
+)
 from xdsl.dialects.math import RoundEvenOp
 from xdsl.dialects.memref import CastOp
-from xdsl.dialects.tpu_conversions import RoundingMode, FPToSIOp
+from xdsl.dialects.tpu_conversions import FPToSIOp, RoundingMode
 from xdsl.dialects.tpu_matmul import MatmulOp
 from xdsl.dialects.tpu_memory import LoadOp, ShuffledLoadOp, ShuffledStoreOp, StoreOp
-from xdsl.dialects.tpu_memref import EraseLayoutOp, MemRefSliceOp, MemRefSqueezeOp, _compute_squeezed_dims
+from xdsl.dialects.tpu_memref import (
+    EraseLayoutOp,
+    MemRefSliceOp,
+    MemRefSqueezeOp,
+    _compute_squeezed_dims,
+)
 from xdsl.dialects.tpu_pack import PackSubelementsOp, UnpackSubelementsOp
-from xdsl.dialects.tpu_shape import BitcastVregOp, DynamicGatherOp, ReshapeOp, RollVectorsOp, UnrollVectorsOp
+from xdsl.dialects.tpu_shape import (
+    BitcastVregOp,
+    DynamicGatherOp,
+    ReshapeOp,
+    RollVectorsOp,
+    UnrollVectorsOp,
+)
 from xdsl.dialects.vector import BroadcastOp
 from xdsl.pattern_rewriter import (
     PatternRewriter,
@@ -17,11 +37,13 @@ from xdsl.pattern_rewriter import (
 from xdsl.transforms.canonicalization_patterns.utils import const_evaluate_operand
 from xdsl.utils.exceptions import VerifyException
 
+
 def _fill_positions(values, positions, size):
     result = [None] * size
     for value, position in zip(values, positions):
         result[position] = value
     return result
+
 
 class BitcastVregChainCollapse(RewritePattern):
     @op_type_rewrite_pattern
@@ -51,6 +73,7 @@ class EraseLayoutChainCollapse(RewritePattern):
             return
         new_op = EraseLayoutOp(defining_op.operand, op.result.type)
         rewriter.replace_matched_op(new_op)
+
 
 class UnpackOfPackCancel(RewritePattern):
     @op_type_rewrite_pattern
@@ -120,7 +143,7 @@ def _is_zero_constant(value):
     if isinstance(attr, DenseIntOrFPElementsAttr):
         try:
             values = list(attr.iter_values())
-        except (AttributeError, TypeError) as e:
+        except (AttributeError, TypeError):
             return False
         all_zero = len(values) > 0 and all(v == 0 or v == 0.0 for v in values)
         return all_zero
@@ -173,12 +196,8 @@ class CanonicalizeAddIOfMatmul(RewritePattern):
 
 class MemRefSliceFoldConstantDynamicDim(RewritePattern):
     @op_type_rewrite_pattern
-    def match_and_rewrite(
-        self, op: MemRefSliceOp, rewriter: PatternRewriter
-    ) -> None:
-        if not any(
-            const_evaluate_operand(ds) is not None for ds in op.dynamic_sizes
-        ):
+    def match_and_rewrite(self, op: MemRefSliceOp, rewriter: PatternRewriter) -> None:
+        if not any(const_evaluate_operand(ds) is not None for ds in op.dynamic_sizes):
             return
 
         old_type = op.result.type
@@ -196,10 +215,11 @@ class MemRefSliceFoldConstantDynamicDim(RewritePattern):
             ):
                 dynamic_dim_index += 1
             if dynamic_dim_index >= len(new_shape):
-
+                return
             const_val = const_evaluate_operand(dynamic_size)
             if const_val is not None:
                 if const_val <= 0:
+                    return
                 new_shape[dynamic_dim_index] = const_val
             else:
                 new_dynamic_sizes.append(dynamic_size)
@@ -227,9 +247,7 @@ class MemRefSliceFoldConstantDynamicDim(RewritePattern):
 
 class MemRefSqueezeFoldCast(RewritePattern):
     @op_type_rewrite_pattern
-    def match_and_rewrite(
-        self, op: MemRefSqueezeOp, rewriter: PatternRewriter
-    ) -> None:
+    def match_and_rewrite(self, op: MemRefSqueezeOp, rewriter: PatternRewriter) -> None:
         producer = op.input.owner
         if not isinstance(producer, CastOp):
             return
@@ -238,8 +256,10 @@ class MemRefSqueezeFoldCast(RewritePattern):
         cast_source_type = cast_source.type
         cast_result_type = producer.dest.type
 
-        if not (isinstance(cast_source_type, MemRefType)
-                and isinstance(cast_result_type, MemRefType)):
+        if not (
+            isinstance(cast_source_type, MemRefType)
+            and isinstance(cast_result_type, MemRefType)
+        ):
             return
         if cast_source_type.get_num_dims() != cast_result_type.get_num_dims():
             return
@@ -263,7 +283,8 @@ class MemRefSqueezeFoldCast(RewritePattern):
             return
 
         new_result_shape = [
-            dim for i, dim in enumerate(cast_source_type.get_shape())
+            dim
+            for i, dim in enumerate(cast_source_type.get_shape())
             if i not in squeezed_dims
         ]
         if len(new_result_shape) != squeeze_result_type.get_num_dims():
@@ -332,9 +353,7 @@ class UnpackOfPackSignExtensionDemote(RewritePattern):
 
 class UnrollOfRollCancel(RewritePattern):
     @op_type_rewrite_pattern
-    def match_and_rewrite(
-        self, op: UnrollVectorsOp, rewriter: PatternRewriter
-    ) -> None:
+    def match_and_rewrite(self, op: UnrollVectorsOp, rewriter: PatternRewriter) -> None:
         producer = op.input.owner
         if not isinstance(producer, RollVectorsOp):
             return
@@ -348,9 +367,7 @@ class UnrollOfRollCancel(RewritePattern):
 
 class FPToSISinkRoundEven(RewritePattern):
     @op_type_rewrite_pattern
-    def match_and_rewrite(
-        self, op: FPToSIOp, rewriter: PatternRewriter
-    ) -> None:
+    def match_and_rewrite(self, op: FPToSIOp, rewriter: PatternRewriter) -> None:
         producer = op.input.owner
         if not isinstance(producer, RoundEvenOp):
             return
@@ -364,9 +381,7 @@ class FPToSISinkRoundEven(RewritePattern):
 
 class ShuffledLoadToSimpleLoad(RewritePattern):
     @op_type_rewrite_pattern
-    def match_and_rewrite(
-        self, op: ShuffledLoadOp, rewriter: PatternRewriter
-    ) -> None:
+    def match_and_rewrite(self, op: ShuffledLoadOp, rewriter: PatternRewriter) -> None:
         offsets = list(op.sublane_offsets.get_values())
         for i, offset in enumerate(offsets):
             if offset != i:
@@ -382,9 +397,7 @@ class ShuffledLoadToSimpleLoad(RewritePattern):
 
 class ShuffledStoreToSimpleStore(RewritePattern):
     @op_type_rewrite_pattern
-    def match_and_rewrite(
-        self, op: ShuffledStoreOp, rewriter: PatternRewriter
-    ) -> None:
+    def match_and_rewrite(self, op: ShuffledStoreOp, rewriter: PatternRewriter) -> None:
         offsets = list(op.sublane_offsets.get_values())
         for i, offset in enumerate(offsets):
             if offset != i:
@@ -398,11 +411,10 @@ class ShuffledStoreToSimpleStore(RewritePattern):
         )
         rewriter.replace_matched_op(new_op)
 
+
 class DynamicGatherToBroadcast(RewritePattern):
     @op_type_rewrite_pattern
-    def match_and_rewrite(
-        self, op: DynamicGatherOp, rewriter: PatternRewriter
-    ) -> None:
+    def match_and_rewrite(self, op: DynamicGatherOp, rewriter: PatternRewriter) -> None:
         src_ty = op.source.type
         if not isinstance(src_ty, VectorType):
             return
